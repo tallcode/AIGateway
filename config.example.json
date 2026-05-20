@@ -5,18 +5,28 @@
   "models": {
     "gpt-4": {
       "name": "GPT-4",
+      "contextLength": 128000,
+      "features": {
+        "reasoning": true,
+        "tools": true
+      },
+      "architecture": {
+        "modality": "text+image"
+      },
       "endpoints": [
         {
           "url": "https://api.openai.com/v1",
           "apiKey": "sk-xxx1",
           "modelName": "gpt-4",
-          "cooldownSeconds": 60
+          "cooldownSeconds": 60,
+          "priority": 1
         },
         {
           "url": "https://openai-backup.example.com/v1",
           "apiKey": "sk-xxx2",
           "modelName": "gpt-4",
-          "cooldownSeconds": 120
+          "cooldownSeconds": 120,
+          "priority": 2
         }
       ]
     }

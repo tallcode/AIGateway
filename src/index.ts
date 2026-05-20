@@ -11,7 +11,7 @@ const config = loadConfig(configPath)
 const endpointManager = new EndpointManager()
 
 for (const [modelName, modelConfig] of Object.entries(config.models) as [string, ModelConfig][]) {
-  endpointManager.registerModel(modelName, modelConfig.name, modelConfig.endpoints)
+  endpointManager.registerModel(modelName, modelConfig.endpoints, modelConfig)
 }
 
 const proxyHandler = new ProxyHandler(endpointManager, config.verbose)

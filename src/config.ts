@@ -23,22 +23,26 @@ const configSchema = {
       minProperties: 1,
       additionalProperties: {
         type: 'object',
-        required: ['name', 'endpoints'],
+        required: ['endpoints'],
         additionalProperties: false,
         properties: {
           name: { type: 'string', minLength: 1 },
+          contextLength: { type: 'number', minimum: 1 },
+          features: { type: 'object' },
+          architecture: { type: 'object' },
           endpoints: {
             type: 'array',
             minItems: 1,
             items: {
               type: 'object',
-              required: ['url', 'apiKey', 'modelName', 'cooldownSeconds'],
+              required: ['url', 'apiKey', 'modelName', 'cooldownSeconds', 'priority'],
               additionalProperties: false,
               properties: {
                 url: { type: 'string', pattern: '^https?://.+$' },
-                apiKey: { type: 'string', minLength: 1 },
+                apiKey: { type: 'string', minLength: 0 },
                 modelName: { type: 'string', minLength: 1 },
                 cooldownSeconds: { type: 'number', minimum: 1 },
+                priority: { type: 'number', minimum: 0 },
               },
             },
           },

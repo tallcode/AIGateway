@@ -12,6 +12,15 @@ interface ProxyResult {
   body: Readable
 }
 
+function extractEndpointName(url: string): string {
+  const host = new URL(url).hostname
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(host)) {
+    return host.split('.').pop()!
+  }
+  const parts = host.split('.')
+  return parts.length >= 2 ? parts[parts.length - 2] : host
+}
+
 function shouldRetry(status: number): boolean {
   return status === 429
     || status === 401
@@ -48,6 +57,7 @@ export class ProxyHandler {
     modelName: string,
     requestBody: unknown,
     requestPath: string,
+    userAgent?: string,
   ): Promise<ProxyResult> {
     const allEndpoints = this.endpointManager.getAllEndpoints(modelName)
     if (allEndpoints.length === 0) {
@@ -67,9 +77,11 @@ export class ProxyHandler {
       }
 
       try {
-        const result = await this.sendToEndpoint(endpoint, requestBody, requestPath)
+        const result = await this.sendToEndpoint(endpoint, requestBody, requestPath, userAgent)
+        const epName = extractEndpointName(endpoint.url)
 
         if (shouldRetry(result.status)) {
+          console.log(`${modelName}:${epName}:${result.status}`)
           console.log(
             `[${new Date().toISOString()}] ${result.status} received from ${endpoint.url}, switching endpoint`,
           )
@@ -78,10 +90,13 @@ export class ProxyHandler {
           continue
         }
 
+        console.log(`${modelName}:${epName}:${result.status}`)
         return result
       }
       catch (error) {
         const err = error as Error
+        const epName = extractEndpointName(endpoint.url)
+        console.log(`${modelName}:${epName}:ERR`)
         lastError = err
         console.log(
           `[${new Date().toISOString()}] Network error from ${endpoint.url}: ${err.message}, switching endpoint`,
@@ -97,27 +112,29 @@ export class ProxyHandler {
     endpoint: EndpointConfig,
     requestBody: unknown,
     requestPath: string,
+    userAgent?: string,
   ): Promise<ProxyResult> {
     const baseUrl = endpoint.url.endsWith('/') ? endpoint.url : `${endpoint.url}/`
     const url = new URL(requestPath.replace(/^\//, ''), baseUrl)
 
     const reqBodyStr = JSON.stringify(requestBody)
 
+    // Use client's UA; fall back to claude-code default (some upstreams require a recognized UA)
+    const ua = userAgent || 'claude-code/2.1.137'
+
     if (this.verbose) {
       console.log(`[${new Date().toISOString()}] >>> Upstream Request`)
       console.log(`    URL: ${url.toString()}`)
-      console.log(`    Headers: ${JSON.stringify({ 'Content-Type': 'application/json', 'Authorization': 'Bearer ***', 'User-Agent': 'claude-code/2.1.137' })}`)
+      console.log(`    Headers: ${JSON.stringify({ 'Content-Type': 'application/json', 'Authorization': 'Bearer ***', 'User-Agent': ua })}`)
       console.log(`    Body: ${reqBodyStr}`)
     }
 
     const response = await request(url.toString(), {
       method: 'POST',
-      // claude-code UA is required: some upstream providers (e.g. OpenRouter, Azure)
-      // reject requests without a recognized client User-Agent string.
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${endpoint.apiKey}`,
-        'User-Agent': 'claude-code/2.1.137',
+        'User-Agent': ua,
       },
       body: reqBodyStr,
     })

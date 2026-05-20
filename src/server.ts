@@ -30,13 +30,26 @@ export function createServer(
 
   app.get('/v1/models', async (_request, reply) => {
     const modelKeys = endpointManager.getModelKeys()
-    const data = modelKeys.map(m => ({
-      id: m,
-      name: endpointManager.getModelDisplayName(m) ?? m,
-      object: 'model',
-      created: 1779235200,
-      owned_by: 'system',
-    }))
+    const data = modelKeys.map((m) => {
+      const meta = endpointManager.getModelConfig(m)
+      const entry: Record<string, unknown> = {
+        id: m,
+        object: 'model',
+        created: 1779235200,
+        owned_by: 'system',
+      }
+      if (meta) {
+        if (meta.name !== undefined)
+          entry.name = meta.name
+        if (meta.contextLength !== undefined)
+          entry.context_length = meta.contextLength
+        if (meta.features !== undefined)
+          entry.features = meta.features
+        if (meta.architecture !== undefined)
+          entry.architecture = meta.architecture
+      }
+      return entry
+    })
     return reply.send({ object: 'list', data })
   })
 
@@ -64,9 +77,10 @@ export function createServer(
     }
 
     const requestPath = `/${(request.params as Record<string, string>)['*']}`
+    const userAgent = request.headers['user-agent']
 
     try {
-      const result = await proxyHandler.forwardRequest(modelName, body, requestPath)
+      const result = await proxyHandler.forwardRequest(modelName, body, requestPath, userAgent)
 
       reply.raw.writeHead(result.status, result.headers)
       result.body.pipe(reply.raw, { end: true })
