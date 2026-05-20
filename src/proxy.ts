@@ -21,6 +21,17 @@ function extractEndpointName(url: string): string {
   return parts.length >= 2 ? parts[parts.length - 2] : host
 }
 
+function logTimestamp(): string {
+  const d = new Date()
+  const ts = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`
+  return `\x1b[90m[${ts}]\x1b[0m`
+}
+
+function logEndpoint(modelName: string, epName: string, status: number | string): void {
+  const color = status === 'ERR' || (typeof status === 'number' && status >= 400) ? '\x1b[31m' : '\x1b[32m'
+  console.log(`${logTimestamp()} ${modelName}:${epName} ${color}${status}\x1b[0m`)
+}
+
 function shouldRetry(status: number): boolean {
   return status === 429
     || status === 401
@@ -78,10 +89,10 @@ export class ProxyHandler {
 
       try {
         const result = await this.sendToEndpoint(endpoint, requestBody, requestPath, userAgent)
-        const epName = extractEndpointName(endpoint.url)
+        const epName = endpoint.tag || extractEndpointName(endpoint.url)
 
         if (shouldRetry(result.status)) {
-          console.log(`${modelName}:${epName}:${result.status}`)
+          logEndpoint(modelName, epName, result.status)
           console.log(
             `[${new Date().toISOString()}] ${result.status} received from ${endpoint.url}, switching endpoint`,
           )
@@ -90,13 +101,13 @@ export class ProxyHandler {
           continue
         }
 
-        console.log(`${modelName}:${epName}:${result.status}`)
+        logEndpoint(modelName, epName, result.status)
         return result
       }
       catch (error) {
         const err = error as Error
-        const epName = extractEndpointName(endpoint.url)
-        console.log(`${modelName}:${epName}:ERR`)
+        const epName = endpoint.tag || extractEndpointName(endpoint.url)
+        logEndpoint(modelName, epName, 'ERR')
         lastError = err
         console.log(
           `[${new Date().toISOString()}] Network error from ${endpoint.url}: ${err.message}, switching endpoint`,
@@ -131,6 +142,8 @@ export class ProxyHandler {
 
     const response = await request(url.toString(), {
       method: 'POST',
+      headersTimeout: 120_000,
+      bodyTimeout: 360_000,
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${endpoint.apiKey}`,

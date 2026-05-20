@@ -43,6 +43,7 @@ const configSchema = {
                 modelName: { type: 'string', minLength: 1 },
                 cooldownSeconds: { type: 'number', minimum: 1 },
                 priority: { type: 'number', minimum: 0 },
+                tag: { type: 'string' },
               },
             },
           },

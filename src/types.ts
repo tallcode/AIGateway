@@ -4,6 +4,7 @@ export interface EndpointConfig {
   modelName: string
   cooldownSeconds: number
   priority: number
+  tag?: string
 }
 
 export interface ModelConfig {
