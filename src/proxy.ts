@@ -92,12 +92,13 @@ export class ProxyHandler {
         const epName = endpoint.tag || extractEndpointName(endpoint.url)
 
         if (shouldRetry(result.status)) {
+          const cooldown = result.status >= 500 ? 60 : endpoint.cooldownSeconds
           logEndpoint(modelName, epName, result.status)
           console.log(
             `[${new Date().toISOString()}] ${result.status} received from ${endpoint.url}, switching endpoint`,
           )
           await drainStream(result.body)
-          this.endpointManager.markCooldown(modelName, endpoint.url)
+          this.endpointManager.markCooldown(modelName, endpoint.url, cooldown)
           continue
         }
 
@@ -112,7 +113,7 @@ export class ProxyHandler {
         console.log(
           `[${new Date().toISOString()}] Network error from ${endpoint.url}: ${err.message}, switching endpoint`,
         )
-        this.endpointManager.markCooldown(modelName, endpoint.url)
+        this.endpointManager.markCooldown(modelName, endpoint.url, 60)
       }
     }
 

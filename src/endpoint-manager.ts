@@ -51,7 +51,7 @@ export class EndpointManager {
     return candidates[Math.floor(Math.random() * candidates.length)].config
   }
 
-  markCooldown(modelName: string, endpointUrl: string): void {
+  markCooldown(modelName: string, endpointUrl: string, cooldownSeconds: number): void {
     const states = this.states.get(modelName)
     if (!states)
       return
@@ -60,9 +60,9 @@ export class EndpointManager {
 
     for (const state of states) {
       if (state.config.url === endpointUrl) {
-        state.cooldownUntil = now + state.config.cooldownSeconds * 1000
+        state.cooldownUntil = now + cooldownSeconds * 1000
         console.log(
-          `[${new Date().toISOString()}] Endpoint cooldown: ${endpointUrl} for ${state.config.cooldownSeconds}s`,
+          `[${new Date().toISOString()}] Endpoint cooldown: ${endpointUrl} for ${cooldownSeconds}s`,
         )
         break
       }
