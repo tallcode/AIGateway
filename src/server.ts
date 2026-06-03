@@ -1,8 +1,53 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
+import type { IncomingHttpHeaders } from 'node:http'
 import type { EndpointManager } from './endpoint-manager.js'
 import type { ProxyHandler } from './proxy.js'
 import type { GatewayConfig } from './types.js'
 import Fastify from 'fastify'
+import { AllEndpointsFailedError, AllEndpointsInCooldownError } from './errors.js'
+
+const HOP_BY_HOP_HEADERS = new Set([
+  'connection',
+  'keep-alive',
+  'proxy-authenticate',
+  'proxy-authorization',
+  'te',
+  'trailers',
+  'transfer-encoding',
+  'upgrade',
+])
+
+function stripHopByHopHeaders(headers: IncomingHttpHeaders): IncomingHttpHeaders {
+  const connection = headers.connection
+  const stripped: IncomingHttpHeaders = {}
+  for (const [key, value] of Object.entries(headers)) {
+    const lower = key.toLowerCase()
+    if (HOP_BY_HOP_HEADERS.has(lower))
+      continue
+    stripped[key] = value
+  }
+  if (typeof connection === 'string') {
+    const remove = connection.split(',').map(h => h.trim().toLowerCase())
+    for (const key of Object.keys(stripped)) {
+      if (remove.includes(key.toLowerCase()))
+        delete stripped[key]
+    }
+  }
+  return stripped
+}
+
+function pipeProxyResult(
+  reply: FastifyReply,
+  result: { status: number, headers: IncomingHttpHeaders, body: NodeJS.ReadableStream },
+): void {
+  reply.raw.writeHead(result.status, stripHopByHopHeaders(result.headers))
+  result.body.on('error', () => {
+    if (!reply.raw.writableEnded) {
+      reply.raw.end()
+    }
+  })
+  result.body.pipe(reply.raw, { end: true })
+}
 
 export function createServer(
   config: GatewayConfig,
@@ -11,6 +56,7 @@ export function createServer(
 ): FastifyInstance {
   const app = Fastify({
     logger: false,
+    bodyLimit: 50 * 1024 * 1024,
   })
 
   app.addHook('onRequest', async (request, reply) => {
@@ -58,7 +104,7 @@ export function createServer(
     const modelName = body?.model as string | undefined
 
     if (config.verbose) {
-      console.log(`[${new Date().toISOString()}] >>> Downstream Request`)
+      console.log(`>>> Downstream Request`)
       console.log(`    Path: ${request.url}`)
       console.log(`    Headers: ${JSON.stringify(request.headers)}`)
       console.log(`    Body: ${JSON.stringify(body)}`)
@@ -81,26 +127,35 @@ export function createServer(
 
     try {
       const result = await proxyHandler.forwardRequest(modelName, body, requestPath, userAgent)
-
-      reply.raw.writeHead(result.status, result.headers)
-      result.body.pipe(reply.raw, { end: true })
-      result.body.on('error', () => {
-        if (!reply.raw.writableEnded) {
-          reply.raw.end()
-        }
-      })
+      pipeProxyResult(reply, result)
     }
     catch (error) {
-      const message = (error as Error).message
-
-      if (message.includes('All endpoints')) {
+      if (error instanceof AllEndpointsInCooldownError) {
         return reply.code(503).send({
           error: { message: 'Service unavailable: all endpoints are in cooldown' },
         })
       }
 
+      if (error instanceof Error && error.message.includes('serialize')) {
+        return reply.code(400).send({
+          error: { message: error.message },
+        })
+      }
+
+      if (error instanceof AllEndpointsFailedError) {
+        if (error.lastUpstreamResult) {
+          pipeProxyResult(reply, error.lastUpstreamResult)
+          return
+        }
+
+        const message = error.lastNetworkError?.message ?? error.message
+        return reply.code(502).send({
+          error: { message: `Upstream error: ${message}` },
+        })
+      }
+
       return reply.code(502).send({
-        error: { message: `Upstream error: ${message}` },
+        error: { message: `Upstream error: ${(error as Error).message}` },
       })
     }
   })

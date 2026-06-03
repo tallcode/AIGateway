@@ -5,6 +5,8 @@ interface EndpointState {
   cooldownUntil: number
 }
 
+const EMPTY_SET: ReadonlySet<string> = new Set()
+
 export class EndpointManager {
   private states: Map<string, EndpointState[]>
   private modelConfigs: Map<string, ModelConfig>
@@ -30,13 +32,13 @@ export class EndpointManager {
     return [...this.states.keys()]
   }
 
-  getAvailableEndpoint(modelName: string): EndpointConfig | null {
+  getAvailableEndpoint(modelName: string, excludeUrls: ReadonlySet<string> = EMPTY_SET): EndpointConfig | null {
     const states = this.states.get(modelName)
     if (!states)
       return null
 
     const now = Date.now()
-    const available = states.filter(s => now >= s.cooldownUntil)
+    const available = states.filter(s => now >= s.cooldownUntil && !excludeUrls.has(s.config.url))
     if (available.length === 0)
       return null
 
@@ -51,6 +53,18 @@ export class EndpointManager {
     return candidates[Math.floor(Math.random() * candidates.length)].config
   }
 
+  getRandomEndpoint(modelName: string, excludeUrls: ReadonlySet<string> = EMPTY_SET): EndpointConfig | null {
+    const states = this.states.get(modelName)
+    if (!states)
+      return null
+
+    const candidates = states.filter(s => !excludeUrls.has(s.config.url))
+    if (candidates.length === 0)
+      return null
+
+    return candidates[Math.floor(Math.random() * candidates.length)].config
+  }
+
   markCooldown(modelName: string, endpointUrl: string, cooldownSeconds: number): void {
     const states = this.states.get(modelName)
     if (!states)
@@ -61,9 +75,6 @@ export class EndpointManager {
     for (const state of states) {
       if (state.config.url === endpointUrl) {
         state.cooldownUntil = now + cooldownSeconds * 1000
-        console.log(
-          `[${new Date().toISOString()}] Endpoint cooldown: ${endpointUrl} for ${cooldownSeconds}s`,
-        )
         break
       }
     }

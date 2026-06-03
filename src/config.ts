@@ -5,8 +5,8 @@ import { resolve } from 'node:path'
 import process from 'node:process'
 
 const require = createRequire(import.meta.url)
-const Ajv = require('ajv').default
-const addFormats = require('ajv-formats').default
+const { default: Ajv } = require('ajv')
+const { default: addFormats } = require('ajv-formats')
 
 const defaultConfigPath = resolve(process.cwd(), 'config.json')
 

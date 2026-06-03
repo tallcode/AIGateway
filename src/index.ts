@@ -25,3 +25,17 @@ app.listen({ port: config.port, host: '0.0.0.0' }, (err: Error | null) => {
   console.log(`AI Gateway running on port ${config.port}`)
   console.log(`Loaded models: ${Object.keys(config.models).join(', ')}`)
 })
+
+function shutdown(signal: string) {
+  console.log(`\nReceived ${signal}, shutting down gracefully...`)
+  app.close().then(() => {
+    console.log('Server closed')
+    process.exit(0)
+  }).catch((err) => {
+    console.error(`Error during shutdown: ${(err as Error).message}`)
+    process.exit(1)
+  })
+}
+
+process.on('SIGINT', () => shutdown('SIGINT'))
+process.on('SIGTERM', () => shutdown('SIGTERM'))
