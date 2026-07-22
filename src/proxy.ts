@@ -2,11 +2,13 @@ import type { IncomingHttpHeaders } from 'node:http'
 import type { Readable } from 'node:stream'
 import type { EndpointManager } from './endpoint-manager.js'
 import type { UpstreamErrorResult } from './errors.js'
-import type { EndpointConfig, Protocol, RequestRule } from './types.js'
+import type { EndpointConfig, Protocol, RectifiersConfig, RequestRule } from './types.js'
 import { Buffer } from 'node:buffer'
 import { Readable as ReadableStream } from 'node:stream'
 import { request } from 'undici'
 import { AllEndpointsFailedError, AllEndpointsInCooldownError, ProtocolNotSupportedError, RequestAdaptationError } from './errors.js'
+import { redactHeaders, summarizeBody } from './log-utils.js'
+import { rectifyAnthropicThinking } from './rectifiers/index.js'
 
 interface ProxyResult {
   status: number
@@ -144,32 +146,46 @@ function applyRule(payload: Record<string, unknown>, rule: RequestRule): boolean
   return applied
 }
 
-function validateAdaptedAnthropicPayload(payload: Record<string, unknown>): void {
+function validateTransformedAnthropicPayload(payload: Record<string, unknown>): void {
   if (!Array.isArray(payload.messages))
     return
+  if (payload.messages.length === 0)
+    throw new RequestAdaptationError('Request transform removed all messages')
   for (const [index, message] of payload.messages.entries()) {
     const content = typeof message === 'object' && message !== null
       ? (message as Record<string, unknown>).content
       : undefined
     if (Array.isArray(content) && content.length === 0) {
-      throw new RequestAdaptationError(`Adapter removed all content from messages[${index}]`)
+      throw new RequestAdaptationError(`Request transform removed all content from messages[${index}]`)
     }
   }
 }
 
-export function prepareRequestPayload(requestBody: unknown, endpoint: EndpointConfig, protocol: Protocol): { payload: unknown, appliedRules: string[] } {
+export function prepareRequestPayload(
+  requestBody: unknown,
+  endpoint: EndpointConfig,
+  protocol: Protocol,
+  rectifiers?: RectifiersConfig,
+): { payload: unknown, appliedRules: string[] } {
   if (typeof requestBody !== 'object' || requestBody === null)
     return { payload: requestBody, appliedRules: [] }
 
   const payload = structuredClone(requestBody) as Record<string, unknown>
   payload.model = endpoint.modelName
+  const rectifierRules: string[] = []
+  if (protocol === 'anthropic' && rectifiers) {
+    const result = rectifyAnthropicThinking(payload, rectifiers.anthropicThinking)
+    if (result.changed) {
+      rectifierRules.push('rectifier:anthropic-thinking')
+    }
+  }
   const adapter = endpoint.adapters[protocol]
-  const appliedRules = adapter?.requestRules
+  const appliedRules = rectifierRules.concat(adapter?.requestRules
     .filter(rule => applyRule(payload, rule))
     .map(rule => `${adapter.protocol}:${rule.action}:${rule.field}`)
-    ?? []
+    ?? [])
   if (protocol === 'anthropic' && appliedRules.length > 0)
-    validateAdaptedAnthropicPayload(payload)
+    validateTransformedAnthropicPayload(payload)
   return { payload, appliedRules }
 }
 
@@ -199,10 +215,14 @@ async function streamToText(stream: Readable): Promise<string> {
 export class AiProxyHandler {
   private endpointManager: EndpointManager
   private verbose: boolean
+  private rectifiers: RectifiersConfig
 
-  constructor(endpointManager: EndpointManager, verbose = false) {
+  constructor(endpointManager: EndpointManager, verbose = false, rectifiers?: RectifiersConfig) {
     this.endpointManager = endpointManager
     this.verbose = verbose
+    this.rectifiers = rectifiers ?? {
+      anthropicThinking: { enabled: false },
+    }
   }
 
   async forwardRequest(
@@ -307,7 +327,7 @@ export class AiProxyHandler {
     const normalizedBase = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`
     const url = new URL(resolveUpstreamPath(requestPath).replace(/^\//, ''), normalizedBase)
 
-    const { payload, appliedRules } = prepareRequestPayload(requestBody, endpoint, protocol)
+    const { payload, appliedRules } = prepareRequestPayload(requestBody, endpoint, protocol, this.rectifiers)
     let reqBodyStr: string
     try {
       reqBodyStr = JSON.stringify(payload)
@@ -337,17 +357,11 @@ export class AiProxyHandler {
     }
 
     if (this.verbose) {
-      const logHeaders = { ...reqHeaders }
-      if (logHeaders.Authorization)
-        logHeaders.Authorization = 'Bearer ***'
-      if (logHeaders['x-api-key'])
-        logHeaders['x-api-key'] = '***'
       console.log(`${logTimestamp()} >>> Upstream Request [${protocol}]`)
       if (appliedRules.length > 0)
-        console.log(`    Adapter rules: ${appliedRules.join(', ')}`)
+        console.log(`    Request transforms: ${appliedRules.join(', ')}`)
       console.log(`    URL: ${url.toString()}`)
-      console.log(`    Headers: ${JSON.stringify(logHeaders)}`)
-      console.log(`    Body: ${reqBodyStr}`)
+      console.log(`    Headers: ${JSON.stringify(redactHeaders(reqHeaders))}`)
     }
 
     const reqStart = Date.now()
@@ -381,8 +395,9 @@ export class AiProxyHandler {
       const bodyText = await streamToText(response.body as Readable)
       if (this.verbose) {
         console.log(`${logTimestamp()} <<< Upstream Response (${response.statusCode})`)
-        console.log(`    Headers: ${JSON.stringify(response.headers)}`)
-        console.log(`    Body: ${bodyText}`)
+        console.log(`    Headers: ${JSON.stringify(redactHeaders(response.headers as Record<string, unknown>))}`)
+        console.log(`    Request Body: ${summarizeBody(payload)}`)
+        console.log(`    Response Body: ${truncateForLog(bodyText)}`)
       }
 
       return {

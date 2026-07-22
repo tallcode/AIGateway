@@ -6,6 +6,7 @@ import type { GatewayConfig, Protocol } from './types.js'
 import { Buffer } from 'node:buffer'
 import Fastify from 'fastify'
 import { AllEndpointsFailedError, AllEndpointsInCooldownError, ProtocolNotSupportedError, RequestAdaptationError } from './errors.js'
+import { redactHeaders, summarizeBody } from './log-utils.js'
 
 const HOP_BY_HOP_HEADERS = new Set([
   'connection',
@@ -239,8 +240,8 @@ export function createServer(
     if (config.verbose) {
       console.log(`>>> Downstream Request [${protocol}]`)
       console.log(`    Path: ${request.url}`)
-      console.log(`    Headers: ${JSON.stringify(request.headers)}`)
-      console.log(`    Body: ${JSON.stringify(body)}`)
+      console.log(`    Headers: ${JSON.stringify(redactHeaders(request.headers as Record<string, unknown>))}`)
+      console.log(`    Body: ${summarizeBody(body)}`)
     }
 
     if (!modelName) {

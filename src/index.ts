@@ -28,7 +28,7 @@ for (const [modelName, modelConfig] of Object.entries(config.models) as [string,
   endpointManager.registerModel(modelName, modelConfig.endpoints, modelConfig)
 }
 
-const proxyHandler = new AiProxyHandler(endpointManager, config.verbose)
+const proxyHandler = new AiProxyHandler(endpointManager, config.verbose, config.rectifiers)
 const app = createServer(config, endpointManager, proxyHandler)
 
 app.listen({ port: config.port, host: '0.0.0.0' }, (err: Error | null) => {

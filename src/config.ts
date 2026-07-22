@@ -1,4 +1,4 @@
-import type { AdapterConfig, EndpointConfig, GatewayConfig, Protocol, ProviderConfig, ProviderUrlConfig, RequestRule } from './types.js'
+import type { AdapterConfig, EndpointConfig, GatewayConfig, Protocol, ProviderConfig, ProviderUrlConfig, RectifiersConfig, RequestRule } from './types.js'
 import { existsSync, readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { resolve } from 'node:path'
@@ -33,6 +33,21 @@ const configSchema = {
     port: { type: 'number', minimum: 1 },
     apiKey: { type: 'string', minLength: 1 },
     verbose: { type: 'boolean', default: false },
+    rectifiers: {
+      type: 'object',
+      required: ['anthropicThinking'],
+      additionalProperties: false,
+      properties: {
+        anthropicThinking: {
+          type: 'object',
+          required: ['enabled'],
+          additionalProperties: false,
+          properties: {
+            enabled: { type: 'boolean' },
+          },
+        },
+      },
+    },
     adapters: {
       type: 'object',
       additionalProperties: {
@@ -146,6 +161,7 @@ interface RawConfig {
   port: number
   apiKey: string
   verbose: boolean
+  rectifiers?: RectifiersConfig
   adapters?: Record<string, AdapterConfig>
   providers: Record<string, ProviderConfig>
   models: Record<string, RawModel>
@@ -269,6 +285,9 @@ export function loadConfig(configPath?: string): GatewayConfig {
     port: rawConfig.port,
     apiKey: rawConfig.apiKey,
     verbose: rawConfig.verbose,
+    rectifiers: rawConfig.rectifiers ?? {
+      anthropicThinking: { enabled: false },
+    },
     adapters,
     providers: rawConfig.providers,
     models,

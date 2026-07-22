@@ -2,6 +2,11 @@
   "port": 3000,
   "apiKey": "your-gateway-api-key",
   "verbose": false,
+  "rectifiers": {
+    "anthropicThinking": {
+      "enabled": true
+    }
+  },
   "adapters": {
     "example-anthropic": {
       "protocol": "anthropic",

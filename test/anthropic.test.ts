@@ -5,6 +5,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { EndpointManager } from '../src/endpoint-manager.js'
 import { prepareRequestPayload, resolveUpstreamPath } from '../src/proxy.js'
+import { rectifyAnthropicThinking } from '../src/rectifiers/index.js'
 import { detectProtocol } from '../src/server.js'
 
 const endpoint: EndpointConfig = {
@@ -60,4 +61,136 @@ test('keeps OpenAI and Anthropic cooldowns independent', () => {
   manager.markCooldown('model', endpoint.urls.anthropic!, 60, 'anthropic')
   assert.equal(manager.getAvailableEndpoint('model', new Set(), false, 'anthropic'), null)
   assert.equal(manager.getAvailableEndpoint('model', new Set(), false, 'openai'), endpoint)
+})
+
+test('strips empty signatures and drops only empty historical thinking blocks', () => {
+  const payload = {
+    messages: [
+      { role: 'assistant', content: [{ type: 'thinking', text: 'legacy thought', signature: 'sig' }, { type: 'text', text: 'answer' }] },
+      { role: 'assistant', content: [{ type: 'thinking', signature: 'missing thought' }] },
+      { role: 'assistant', content: [{ type: 'thinking', thinking: 'unsigned thought', signature: '' }] },
+      { role: 'assistant', content: [{ type: 'redacted_thinking', data: 'opaque' }] },
+    ],
+  }
+  const result = rectifyAnthropicThinking(payload, { enabled: true })
+  assert.deepEqual(payload.messages, [
+    { role: 'assistant', content: [{ type: 'text', text: 'answer' }] },
+    { role: 'assistant', content: [] },
+    { role: 'assistant', content: [{ type: 'thinking', thinking: 'unsigned thought' }] },
+    { role: 'assistant', content: [{ type: 'redacted_thinking', data: 'opaque' }] },
+  ])
+  assert.deepEqual(result, { changed: true, droppedBlocks: 2, strippedSignatures: 1 })
+})
+
+test('can disable the Anthropic thinking rectifier', () => {
+  const disabledPayload = { messages: [{ role: 'assistant', content: [{ type: 'thinking', text: 'legacy' }] }] }
+  const disabledResult = rectifyAnthropicThinking(disabledPayload, { enabled: false })
+  assert.equal(disabledResult.changed, false)
+  assert.deepEqual(disabledPayload.messages[0].content, [{ type: 'thinking', text: 'legacy' }])
+
+  const result = prepareRequestPayload(
+    { model: 'gateway-model', messages: [{ role: 'assistant', content: [{ type: 'thinking', thinking: 'valid' }, { type: 'text', text: 'answer' }] }] },
+    endpoint,
+    'anthropic',
+    { anthropicThinking: { enabled: true } },
+  )
+  assert.deepEqual(result.payload, {
+    model: 'upstream-model',
+    reasoning_effort: 'low',
+    messages: [{ role: 'assistant', content: [{ type: 'thinking', thinking: 'valid' }, { type: 'text', text: 'answer' }] }],
+  })
+  assert.deepEqual(result.appliedRules, ['rectifier:anthropic-thinking'])
+
+  assert.throws(() => prepareRequestPayload(
+    { model: 'gateway-model', messages: [{ role: 'assistant', content: [{ type: 'thinking', thinking: '' }] }] },
+    endpoint,
+    'anthropic',
+    { anthropicThinking: { enabled: true } },
+  ), /removed all content/)
+})
+
+test('does not run the Anthropic rectifier for OpenAI requests', () => {
+  const result = prepareRequestPayload(
+    { model: 'gateway-model', messages: [{ role: 'assistant', content: [{ type: 'thinking', text: 'leave unchanged' }] }] },
+    endpoint,
+    'openai',
+    { anthropicThinking: { enabled: true } },
+  )
+  assert.deepEqual(result.payload, {
+    model: 'upstream-model',
+    messages: [{ role: 'assistant', content: [{ type: 'thinking', text: 'leave unchanged' }] }],
+  })
+  assert.deepEqual(result.appliedRules, [])
+})
+
+test('normalizes adaptive thinking options from Claude requests', () => {
+  const cases = [
+    { input: 'low', expectedEffort: 'low', expectedBudget: 1024 },
+    { input: 'medium', expectedEffort: 'high', expectedBudget: 4096 },
+    { input: 'high', expectedEffort: 'xhigh', expectedBudget: 16000 },
+  ] as const
+
+  for (const testCase of cases) {
+    const result = prepareRequestPayload(
+      {
+        model: 'gateway-model',
+        output_config: { effort: testCase.input },
+        thinking: { type: 'adaptive' },
+      },
+      endpoint,
+      'anthropic',
+      { anthropicThinking: { enabled: true } },
+    )
+    assert.deepEqual(result.payload, {
+      model: 'upstream-model',
+      output_config: { effort: testCase.input },
+      reasoning_effort: testCase.expectedEffort,
+      thinking: { type: 'enabled', budget_tokens: testCase.expectedBudget },
+    })
+    assert.deepEqual(result.appliedRules, ['rectifier:anthropic-thinking'])
+  }
+})
+
+test('preserves explicit thinking budgets and supports existing reasoning_effort', () => {
+  const explicitBudget = prepareRequestPayload(
+    {
+      model: 'gateway-model',
+      output_config: { effort: 'medium' },
+      reasoning_effort: 'low',
+      thinking: { type: 'enabled', budget_tokens: 7777 },
+    },
+    endpoint,
+    'anthropic',
+    { anthropicThinking: { enabled: true } },
+  )
+  assert.deepEqual(explicitBudget.payload, {
+    model: 'upstream-model',
+    output_config: { effort: 'medium' },
+    reasoning_effort: 'low',
+    thinking: { type: 'enabled', budget_tokens: 7777 },
+  })
+
+  const existingEffort = prepareRequestPayload(
+    { model: 'gateway-model', reasoning_effort: 'xhigh', thinking: { type: 'enabled' } },
+    endpoint,
+    'anthropic',
+    { anthropicThinking: { enabled: true } },
+  )
+  assert.deepEqual(existingEffort.payload, {
+    model: 'upstream-model',
+    reasoning_effort: 'xhigh',
+    thinking: { type: 'enabled', budget_tokens: 16000 },
+  })
+
+  const defaultEffort = prepareRequestPayload(
+    { model: 'gateway-model', thinking: { type: 'enabled' } },
+    endpoint,
+    'anthropic',
+    { anthropicThinking: { enabled: true } },
+  )
+  assert.deepEqual(defaultEffort.payload, {
+    model: 'upstream-model',
+    reasoning_effort: 'low',
+    thinking: { type: 'enabled', budget_tokens: 1024 },
+  })
 })

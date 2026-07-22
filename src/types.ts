@@ -14,6 +14,12 @@ export interface AdapterConfig {
   requestRules: RequestRule[]
 }
 
+export interface RectifiersConfig {
+  anthropicThinking: {
+    enabled: boolean
+  }
+}
+
 export interface ProviderUrlConfig {
   openai?: string
   anthropic?: string
@@ -50,6 +56,7 @@ export interface GatewayConfig {
   port: number
   apiKey: string
   verbose: boolean
+  rectifiers: RectifiersConfig
   adapters: Record<string, AdapterConfig>
   providers: Record<string, ProviderConfig>
   models: Record<string, ModelConfig>
