@@ -2,11 +2,25 @@ import type { ModelConfig } from './types.js'
 import process from 'node:process'
 import { loadConfig } from './config.js'
 import { EndpointManager } from './endpoint-manager.js'
-import { ProxyHandler } from './proxy.js'
+import { AiProxyHandler } from './proxy.js'
 import { createServer } from './server.js'
 
-const configPath = process.argv[2]
+process.on('uncaughtException', (err: Error & { code?: string }) => {
+  console.error(`[FATAL] uncaughtException: ${err.name}: ${err.message}${err.code ? ` [${err.code}]` : ''}`)
+  if (err.stack)
+    console.error(err.stack)
+})
+
+process.on('unhandledRejection', (reason: unknown) => {
+  console.error(`[FATAL] unhandledRejection:`, reason)
+})
+
+const args = process.argv.slice(2)
+const verboseFlag = args.includes('-v') || args.includes('--verbose')
+const configPath = args.find(a => !a.startsWith('-'))
 const config = loadConfig(configPath)
+if (verboseFlag)
+  config.verbose = true
 
 const endpointManager = new EndpointManager()
 
@@ -14,7 +28,7 @@ for (const [modelName, modelConfig] of Object.entries(config.models) as [string,
   endpointManager.registerModel(modelName, modelConfig.endpoints, modelConfig)
 }
 
-const proxyHandler = new ProxyHandler(endpointManager, config.verbose)
+const proxyHandler = new AiProxyHandler(endpointManager, config.verbose)
 const app = createServer(config, endpointManager, proxyHandler)
 
 app.listen({ port: config.port, host: '0.0.0.0' }, (err: Error | null) => {

@@ -2,6 +2,36 @@
   "port": 3000,
   "apiKey": "your-gateway-api-key",
   "verbose": false,
+  "adapters": {
+    "example-anthropic": {
+      "protocol": "anthropic",
+      "requestRules": [
+        {
+          "field": "thinking.budget_tokens",
+          "action": "clamp",
+          "value": [1, null]
+        }
+      ]
+    }
+  },
+  "providers": {
+    "openai": {
+      "url": {
+        "openai": "https://api.openai.com/v1",
+        "anthropic": "https://api.anthropic.com/v1"
+      },
+      "apiKey": "sk-xxx",
+      "cooldownSeconds": 60,
+      "adapters": {
+        "anthropic": "example-anthropic"
+      }
+    },
+    "openai-backup": {
+      "url": "https://openai-backup.example.com/v1",
+      "apiKey": "sk-yyy",
+      "responseApi": false
+    }
+  },
   "models": {
     "gpt-4": {
       "name": "GPT-4",
@@ -15,17 +45,16 @@
       },
       "endpoints": [
         {
-          "url": "https://api.openai.com/v1",
-          "apiKey": "sk-xxx1",
-          "modelName": "gpt-4",
-          "cooldownSeconds": 60,
+          "provider": "openai",
           "priority": 1
         },
         {
-          "url": "https://openai-backup.example.com/v1",
-          "apiKey": "sk-xxx2",
-          "modelName": "gpt-4",
+          "provider": "openai-backup",
+          "modelName": "gpt-4-turbo",
           "cooldownSeconds": 120,
+          "adapters": {
+            "anthropic": "example-anthropic"
+          },
           "priority": 2
         }
       ]

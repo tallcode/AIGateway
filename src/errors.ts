@@ -1,5 +1,6 @@
 import type { IncomingHttpHeaders } from 'node:http'
 import type { Readable } from 'node:stream'
+import type { Protocol } from './types.js'
 
 export interface UpstreamErrorResult {
   status: number
@@ -21,5 +22,22 @@ export class AllEndpointsFailedError extends Error {
   ) {
     super('All endpoints failed')
     this.name = 'AllEndpointsFailedError'
+  }
+}
+
+export class ProtocolNotSupportedError extends Error {
+  constructor(
+    readonly modelName: string,
+    readonly protocol: Protocol,
+  ) {
+    super(`No endpoints support ${protocol} protocol for model: ${modelName}`)
+    this.name = 'ProtocolNotSupportedError'
+  }
+}
+
+export class RequestAdaptationError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'RequestAdaptationError'
   }
 }
