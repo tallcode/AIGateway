@@ -4,8 +4,6 @@ export interface AnthropicThinkingRectifierOptions {
 
 export interface AnthropicThinkingRectifierResult {
   changed: boolean
-  droppedBlocks: number
-  strippedSignatures: number
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -70,8 +68,6 @@ export function rectifyAnthropicThinking(
 ): AnthropicThinkingRectifierResult {
   const result: AnthropicThinkingRectifierResult = {
     changed: false,
-    droppedBlocks: 0,
-    strippedSignatures: 0,
   }
   if (!options.enabled)
     return result
@@ -79,37 +75,5 @@ export function rectifyAnthropicThinking(
   if (rectifyThinkingRequestConfig(payload))
     result.changed = true
 
-  if (!Array.isArray(payload.messages))
-    return result
-
-  for (const messageValue of payload.messages) {
-    const message = asRecord(messageValue)
-    if (!message || !Array.isArray(message.content))
-      continue
-
-    const content: unknown[] = []
-    for (const blockValue of message.content) {
-      const block = asRecord(blockValue)
-      if (!block || block.type !== 'thinking') {
-        content.push(blockValue)
-        continue
-      }
-
-      if (typeof block.thinking !== 'string' || block.thinking.length === 0) {
-        result.changed = true
-        result.droppedBlocks++
-        continue
-      }
-
-      if (block.signature === '') {
-        delete block.signature
-        result.changed = true
-        result.strippedSignatures++
-      }
-      content.push(block)
-    }
-
-    message.content = content
-  }
   return result
 }

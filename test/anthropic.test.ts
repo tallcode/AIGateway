@@ -63,30 +63,11 @@ test('keeps OpenAI and Anthropic cooldowns independent', () => {
   assert.equal(manager.getAvailableEndpoint('model', new Set(), false, 'openai'), endpoint)
 })
 
-test('strips empty signatures and drops only empty historical thinking blocks', () => {
-  const payload = {
-    messages: [
-      { role: 'assistant', content: [{ type: 'thinking', text: 'legacy thought', signature: 'sig' }, { type: 'text', text: 'answer' }] },
-      { role: 'assistant', content: [{ type: 'thinking', signature: 'missing thought' }] },
-      { role: 'assistant', content: [{ type: 'thinking', thinking: 'unsigned thought', signature: '' }] },
-      { role: 'assistant', content: [{ type: 'redacted_thinking', data: 'opaque' }] },
-    ],
-  }
-  const result = rectifyAnthropicThinking(payload, { enabled: true })
-  assert.deepEqual(payload.messages, [
-    { role: 'assistant', content: [{ type: 'text', text: 'answer' }] },
-    { role: 'assistant', content: [] },
-    { role: 'assistant', content: [{ type: 'thinking', thinking: 'unsigned thought' }] },
-    { role: 'assistant', content: [{ type: 'redacted_thinking', data: 'opaque' }] },
-  ])
-  assert.deepEqual(result, { changed: true, droppedBlocks: 2, strippedSignatures: 1 })
-})
-
 test('can disable the Anthropic thinking rectifier', () => {
-  const disabledPayload = { messages: [{ role: 'assistant', content: [{ type: 'thinking', text: 'legacy' }] }] }
+  const disabledPayload = { thinking: { type: 'adaptive' } }
   const disabledResult = rectifyAnthropicThinking(disabledPayload, { enabled: false })
   assert.equal(disabledResult.changed, false)
-  assert.deepEqual(disabledPayload.messages[0].content, [{ type: 'thinking', text: 'legacy' }])
+  assert.deepEqual(disabledPayload.thinking, { type: 'adaptive' })
 
   const result = prepareRequestPayload(
     { model: 'gateway-model', messages: [{ role: 'assistant', content: [{ type: 'thinking', thinking: 'valid' }, { type: 'text', text: 'answer' }] }] },
@@ -100,13 +81,6 @@ test('can disable the Anthropic thinking rectifier', () => {
     messages: [{ role: 'assistant', content: [{ type: 'thinking', thinking: 'valid' }, { type: 'text', text: 'answer' }] }],
   })
   assert.deepEqual(result.appliedRules, ['rectifier:anthropic-thinking'])
-
-  assert.throws(() => prepareRequestPayload(
-    { model: 'gateway-model', messages: [{ role: 'assistant', content: [{ type: 'thinking', thinking: '' }] }] },
-    endpoint,
-    'anthropic',
-    { anthropicThinking: { enabled: true } },
-  ), /removed all content/)
 })
 
 test('does not run the Anthropic rectifier for OpenAI requests', () => {
