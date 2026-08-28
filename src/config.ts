@@ -84,6 +84,7 @@ const configSchema = {
           contextLength: { type: 'number', minimum: 1 },
           features: { type: 'object' },
           architecture: { type: 'object' },
+          maxOutputTokens: { type: 'number', minimum: 1 },
           endpoints: {
             type: 'array',
             minItems: 1,
@@ -130,6 +131,7 @@ interface RawModel {
   contextLength?: number
   features?: Record<string, unknown>
   architecture?: Record<string, unknown>
+  maxOutputTokens?: number
   endpoints: RawEndpoint[]
 }
 
@@ -247,6 +249,7 @@ export function loadConfig(configPath?: string): GatewayConfig {
       contextLength: rawModel.contextLength,
       features: rawModel.features,
       architecture: rawModel.architecture,
+      maxOutputTokens: rawModel.maxOutputTokens,
       endpoints: resolved[modelKey].endpoints,
     }
   }

@@ -12,22 +12,26 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
     : undefined
 }
 
-type ReasoningEffort = 'low' | 'high' | 'xhigh'
+type ReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh'
 
 function normalizeReasoningEffort(effort: unknown): ReasoningEffort {
   if (effort === 'low')
     return 'low'
-  if (effort === 'medium' || effort === 'hight')
+  if (effort === 'medium')
+    return 'medium'
+  if (effort === 'hight')
     return 'high'
+  // 'high' (and any unknown value) becomes 'xhigh': the gateway's models are
+  // tuned for maximum thinking on Claude Code's "high" setting.
   return 'xhigh'
 }
 
 function budgetForEffort(effort: ReasoningEffort): number {
   if (effort === 'low')
     return 1024
-  if (effort === 'high')
-    return 4096
-  return 16000
+  if (effort === 'xhigh')
+    return 16000
+  return 4096
 }
 
 function rectifyThinkingRequestConfig(payload: Record<string, unknown>): boolean {
@@ -62,6 +66,15 @@ function rectifyThinkingRequestConfig(payload: Record<string, unknown>): boolean
     thinking.budget_tokens = budgetForEffort(effort)
     changed = true
   }
+
+  // `output_config` is a Claude-native field none of the gateway's upstreams
+  // understand. Its `effort` was consumed above; drop the whole object so it
+  // never leaks through to the provider (rig/rust-genai never emit it either).
+  if (Object.hasOwn(payload, 'output_config')) {
+    delete payload.output_config
+    changed = true
+  }
+
   return changed
 }
 

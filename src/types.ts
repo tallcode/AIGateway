@@ -10,7 +10,12 @@ export type UrlProtocol = Protocol | 'response'
 export interface Adapter {
   readonly name: string
   readonly protocol: Protocol
-  apply: (payload: Record<string, unknown>) => boolean
+  /**
+   * Mutates the cloned payload and reports whether anything changed.
+   * `model` is the model's config (`models.<key>`), with `endpoints` trimmed
+   * down to only the endpoint currently being targeted.
+   */
+  apply: (payload: Record<string, unknown>, model: ModelConfig) => boolean
 }
 
 export interface RectifiersConfig {
@@ -47,6 +52,13 @@ export interface ModelConfig {
   contextLength?: number
   features?: Record<string, unknown>
   architecture?: Record<string, unknown>
+  /**
+   * Output-token cap for this model. When set, the gateway clamps the
+   * request's output limit (max_tokens / max_completion_tokens /
+   * max_output_tokens) to this value, and fills it in for Anthropic requests
+   * where the field is protocol-required.
+   */
+  maxOutputTokens?: number
   endpoints: EndpointConfig[]
 }
 

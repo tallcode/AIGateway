@@ -2,7 +2,7 @@ import type { IncomingHttpHeaders } from 'node:http'
 import type { Readable } from 'node:stream'
 import type { EndpointManager } from './endpoint-manager.js'
 import type { UpstreamErrorResult } from './errors.js'
-import type { EndpointConfig, Protocol, RectifiersConfig, UrlProtocol } from './types.js'
+import type { EndpointConfig, ModelConfig, Protocol, RectifiersConfig, UrlProtocol } from './types.js'
 import { Buffer } from 'node:buffer'
 import { Readable as ReadableStream } from 'node:stream'
 import { request } from 'undici'
@@ -102,6 +102,16 @@ export function resolveUpstreamPath(requestPath: string): string {
   return `/${requestPath.replace(/^\/+/, '')}`
 }
 
+/**
+ * Build the model config passed to adapters: the model's `models.<key>` entry,
+ * but with `endpoints` trimmed down to only the endpoint currently being used.
+ */
+function modelConfigForEndpoint(model: ModelConfig | undefined, endpoint: EndpointConfig): ModelConfig {
+  return model
+    ? { ...model, endpoints: model.endpoints.filter(e => e === endpoint) }
+    : { endpoints: [endpoint] }
+}
+
 function validateTransformedAnthropicPayload(payload: Record<string, unknown>): void {
   if (!Array.isArray(payload.messages))
     return
@@ -117,24 +127,77 @@ function validateTransformedAnthropicPayload(payload: Record<string, unknown>): 
   }
 }
 
+// Output-limit fields by protocol. OpenAI speaks all three depending on API
+// generation (legacy chat / o-series chat / responses); Anthropic only max_tokens.
+const OPENAI_MAX_OUTPUT_FIELDS = ['max_tokens', 'max_completion_tokens', 'max_output_tokens'] as const
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined
+}
+
+/**
+ * Enforce the model's configured `maxOutputTokens` cap.
+ * - Anthropic: `max_tokens` is protocol-required, so a missing value is filled
+ *   with the cap (same policy as rig/rust-genai), and the result is never left
+ *   at or below `thinking.budget_tokens` (Anthropic rejects that).
+ * - OpenAI: clamps whichever of the three output-limit fields is present;
+ *   nothing is added when the client sent none (upstream defaults apply).
+ */
+function applyMaxOutputTokens(payload: Record<string, unknown>, model: ModelConfig, protocol: Protocol): boolean {
+  const cap = model.maxOutputTokens
+  if (typeof cap !== 'number' || cap < 1)
+    return false
+
+  let changed = false
+  if (protocol === 'anthropic') {
+    const budget = asRecord(payload.thinking)?.budget_tokens
+    const current = typeof payload.max_tokens === 'number' && payload.max_tokens > 0
+      ? payload.max_tokens
+      : undefined
+    let target = current !== undefined ? Math.min(current, cap) : cap
+    if (typeof budget === 'number' && target <= budget)
+      target = Math.min(cap, budget + 1)
+    if (payload.max_tokens !== target) {
+      payload.max_tokens = target
+      changed = true
+    }
+  }
+  else {
+    for (const field of OPENAI_MAX_OUTPUT_FIELDS) {
+      if (typeof payload[field] === 'number' && payload[field] > cap) {
+        payload[field] = cap
+        changed = true
+      }
+    }
+  }
+  return changed
+}
+
 export function prepareRequestPayload(
   requestBody: unknown,
   endpoint: EndpointConfig,
   protocol: Protocol,
   rectifiers?: RectifiersConfig,
+  modelConfig?: ModelConfig,
 ): { payload: unknown, appliedRules: string[] } {
   if (typeof requestBody !== 'object' || requestBody === null)
     return { payload: requestBody, appliedRules: [] }
 
   const payload = structuredClone(requestBody) as Record<string, unknown>
   payload.model = endpoint.modelName
+  const model = modelConfigForEndpoint(modelConfig, endpoint)
   const appliedRules: string[] = []
   if (protocol === 'anthropic' && rectifiers && rectifyAnthropicThinking(payload, rectifiers.anthropicThinking).changed) {
     appliedRules.push('rectifier:anthropic-thinking')
   }
   const adapter = endpoint.adapters[protocol]
-  if (adapter && adapter.apply(payload)) {
+  if (adapter && adapter.apply(payload, model)) {
     appliedRules.push(`adapter:${adapter.name}`)
+  }
+  if (applyMaxOutputTokens(payload, model, protocol)) {
+    appliedRules.push('model:max-output-tokens')
   }
   if (protocol === 'anthropic' && appliedRules.length > 0)
     validateTransformedAnthropicPayload(payload)
@@ -220,6 +283,7 @@ export class AiProxyHandler {
     if (allEndpoints.length === 0) {
       throw new Error(`No endpoints configured for model: ${modelName}`)
     }
+    const fullModelConfig = this.endpointManager.getModelConfig(modelName)
 
     const requireResponseApi = protocol === 'openai' && /\/responses\/?$/.test(requestPath)
     const urlKey = urlKeyFor(protocol, requireResponseApi)
@@ -249,9 +313,10 @@ export class AiProxyHandler {
 
       const resolvedUrl = endpoint.urls[urlKey]!
       triedEndpoints.add(endpoint)
+      const modelConfig = modelConfigForEndpoint(fullModelConfig, endpoint)
 
       try {
-        const result = await this.sendToEndpoint(endpoint, requestBody, requestPath, userAgent, protocol, anthropicHeaders, urlKey)
+        const result = await this.sendToEndpoint(endpoint, requestBody, requestPath, userAgent, protocol, anthropicHeaders, urlKey, modelConfig)
         const epName = endpoint.tag || extractEndpointName(resolvedUrl)
 
         if (shouldRetry(result.status)) {
@@ -321,12 +386,13 @@ export class AiProxyHandler {
     protocol: Protocol = 'openai',
     anthropicHeaders?: AnthropicForwardHeaders,
     urlKey: UrlProtocol = 'openai',
+    modelConfig?: ModelConfig,
   ): Promise<ProxyResult> {
     const baseUrl = endpoint.urls[urlKey]!
     const normalizedBase = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`
     const url = new URL(resolveUpstreamPath(requestPath).replace(/^\//, ''), normalizedBase)
 
-    const { payload, appliedRules } = prepareRequestPayload(requestBody, endpoint, protocol, this.rectifiers)
+    const { payload, appliedRules } = prepareRequestPayload(requestBody, endpoint, protocol, this.rectifiers, modelConfig)
     let reqBodyStr: string
     try {
       reqBodyStr = JSON.stringify(payload)

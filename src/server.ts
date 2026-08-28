@@ -43,7 +43,9 @@ export function detectProtocol(request: Pick<FastifyRequest, 'url' | 'headers'>)
   // Detect by path first: /v1/messages is the Anthropic Messages API, while every
   // other /v1/* endpoint (chat/completions, responses, ...) speaks the OpenAI
   // protocol — even if the client happens to send an x-api-key header.
-  if (path === '/v1/messages')
+  // /v1/messages/count_tokens is Anthropic's token-counting endpoint and must
+  // route like /v1/messages (Claude Code calls it during context compaction).
+  if (path === '/v1/messages' || path.startsWith('/v1/messages/'))
     return 'anthropic'
   if (path.startsWith('/v1/'))
     return 'openai'
@@ -54,13 +56,14 @@ export function detectProtocol(request: Pick<FastifyRequest, 'url' | 'headers'>)
   return 'openai'
 }
 
-function extractAnthropicHeaders(request: FastifyRequest): AnthropicForwardHeaders | undefined {
+/** Anthropic requires `anthropic-version`; fill it in when the client omits it. */
+const DEFAULT_ANTHROPIC_VERSION = '2023-06-01'
+
+export function extractAnthropicHeaders(request: Pick<FastifyRequest, 'headers'>): AnthropicForwardHeaders {
   const version = request.headers['anthropic-version']
-  if (!version || typeof version !== 'string')
-    return undefined
   const beta = request.headers['anthropic-beta']
   return {
-    anthropicVersion: version,
+    anthropicVersion: typeof version === 'string' && version ? version : DEFAULT_ANTHROPIC_VERSION,
     anthropicBeta: typeof beta === 'string' ? beta : undefined,
   }
 }

@@ -41,6 +41,7 @@
       "architecture": {
         "modality": "text+image"
       },
+      "maxOutputTokens": 32000,
       "endpoints": [
         {
           "provider": "openai",
