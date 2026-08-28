@@ -39,8 +39,15 @@ function stripHopByHopHeaders(headers: IncomingHttpHeaders): IncomingHttpHeaders
 }
 
 export function detectProtocol(request: Pick<FastifyRequest, 'url' | 'headers'>): Protocol {
-  if (request.url.split('?', 1)[0] === '/v1/messages')
+  const path = request.url.split('?', 1)[0]
+  // Detect by path first: /v1/messages is the Anthropic Messages API, while every
+  // other /v1/* endpoint (chat/completions, responses, ...) speaks the OpenAI
+  // protocol — even if the client happens to send an x-api-key header.
+  if (path === '/v1/messages')
     return 'anthropic'
+  if (path.startsWith('/v1/'))
+    return 'openai'
+  // Fall back to header sniffing for anything outside /v1/*.
   if (request.headers['x-api-key'] || request.headers['anthropic-version']) {
     return 'anthropic'
   }
@@ -94,6 +101,9 @@ function pipeProxyResult(
   context?: { modelName?: string, requestPath?: string },
   verbose = false,
 ): void {
+  // Take over the raw response so Fastify stops managing it; we stream the
+  // upstream body straight to the client below.
+  reply.hijack()
   reply.raw.writeHead(result.status, stripHopByHopHeaders(result.headers))
 
   const upstream = result.body as NodeJS.ReadableStream
@@ -168,11 +178,35 @@ function pipeProxyResult(
   upstream.pipe(reply.raw, { end: true })
 }
 
+function getBearerToken(request: FastifyRequest): string | undefined {
+  const authHeader = request.headers.authorization
+  return typeof authHeader === 'string' && authHeader.startsWith('Bearer ')
+    ? authHeader.slice(7)
+    : undefined
+}
+
+// Key provided by the client: Anthropic allows x-api-key or Bearer, OpenAI is Bearer-only.
+function extractProvidedKey(request: FastifyRequest, protocol: Protocol): string | undefined {
+  if (protocol === 'anthropic') {
+    const apiKey = request.headers['x-api-key']
+    if (typeof apiKey === 'string' && apiKey)
+      return apiKey
+  }
+  return getBearerToken(request)
+}
+
 export function createServer(
   config: GatewayConfig,
   endpointManager: EndpointManager,
   proxyHandler: AiProxyHandler,
 ): FastifyInstance {
+  // Auth (the onRequest hook) guarantees the caller's key exists in the map,
+  // so every forwarded request carries the id configured for its key.
+  const resolveCallerId = (request: FastifyRequest, protocol: Protocol): string | undefined => {
+    const providedKey = extractProvidedKey(request, protocol)
+    return providedKey ? config.apiKeys[providedKey] || undefined : undefined
+  }
+
   const app = Fastify({
     logger: false,
     bodyLimit: 50 * 1024 * 1024,
@@ -183,24 +217,18 @@ export function createServer(
       return
 
     const protocol = detectProtocol(request)
+    const providedKey = extractProvidedKey(request, protocol)
 
     if (protocol === 'anthropic') {
-      const apiKey = request.headers['x-api-key']
-      const authHeader = request.headers.authorization
-      const bearerToken = typeof authHeader === 'string' && authHeader.startsWith('Bearer ')
-        ? authHeader.slice(7)
-        : undefined
-      if (apiKey !== config.apiKey && bearerToken !== config.apiKey) {
+      if (!providedKey || !Object.hasOwn(config.apiKeys, providedKey)) {
         return reply.code(401).send(formatErrorResponse('anthropic', 401, 'Invalid or missing API key'))
       }
     }
     else {
-      const authHeader = request.headers.authorization
-      if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      if (!providedKey) {
         return reply.code(401).send(formatErrorResponse('openai', 401, 'Missing or invalid Authorization header'))
       }
-      const token = authHeader.slice(7)
-      if (token !== config.apiKey) {
+      if (!Object.hasOwn(config.apiKeys, providedKey)) {
         return reply.code(403).send(formatErrorResponse('openai', 403, 'Invalid API key'))
       }
     }
@@ -236,9 +264,10 @@ export function createServer(
     const modelName = body?.model as string | undefined
     const protocol = detectProtocol(request)
     const anthropicHeaders = protocol === 'anthropic' ? extractAnthropicHeaders(request) : undefined
+    const callerId = resolveCallerId(request, protocol)
 
     if (config.verbose) {
-      console.log(`>>> Downstream Request [${protocol}]`)
+      console.log(`>>> Downstream Request [${protocol}]${callerId ? ` (${callerId})` : ''}`)
       console.log(`    Path: ${request.url}`)
       console.log(`    Headers: ${JSON.stringify(redactHeaders(request.headers as Record<string, unknown>))}`)
       console.log(`    Body: ${summarizeBody(body)}`)
@@ -259,7 +288,7 @@ export function createServer(
     const ctx = { modelName, requestPath }
 
     try {
-      const result = await proxyHandler.forwardRequest(modelName, body, requestPath, userAgent, protocol, anthropicHeaders)
+      const result = await proxyHandler.forwardRequest(modelName, body, requestPath, userAgent, protocol, anthropicHeaders, callerId)
       pipeProxyResult(reply, result, ctx, config.verbose)
     }
     catch (error) {

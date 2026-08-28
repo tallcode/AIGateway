@@ -1,8 +1,10 @@
-import type { AdapterConfig, EndpointConfig, GatewayConfig, Protocol, ProviderConfig, ProviderUrlConfig, RectifiersConfig, RequestRule } from './types.js'
+import type { EndpointConfig, GatewayConfig, Protocol, ProviderConfig, ProviderUrlConfig, RectifiersConfig, UrlProtocol } from './types.js'
 import { existsSync, readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { resolve } from 'node:path'
 import process from 'node:process'
+import { adapters as builtinAdapters } from './adapters/index.js'
+import { rectifiers as rectifierRegistry } from './rectifiers/index.js'
 
 const require = createRequire(import.meta.url)
 const { default: Ajv } = require('ajv')
@@ -11,27 +13,27 @@ const { default: addFormats } = require('ajv-formats')
 const defaultConfigPath = resolve(process.cwd(), 'config.json')
 
 const urlSchema = {
-  anyOf: [
-    { type: 'string', pattern: '^https?://.+$' },
-    {
-      type: 'object',
-      properties: {
-        openai: { type: 'string', pattern: '^https?://.+$' },
-        anthropic: { type: 'string', pattern: '^https?://.+$' },
-      },
-      additionalProperties: false,
-      minProperties: 1,
-    },
-  ],
+  type: 'object',
+  properties: {
+    openai: { type: 'string', pattern: '^https?://.+$' },
+    anthropic: { type: 'string', pattern: '^https?://.+$' },
+    response: { type: 'string', pattern: '^https?://.+$' },
+  },
+  additionalProperties: false,
+  minProperties: 1,
 } as const
 
 const configSchema = {
   type: 'object',
-  required: ['port', 'apiKey', 'providers', 'models'],
+  required: ['port', 'apiKeys', 'providers', 'models'],
   additionalProperties: false,
   properties: {
     port: { type: 'number', minimum: 1 },
-    apiKey: { type: 'string', minLength: 1 },
+    apiKeys: {
+      type: 'object',
+      minProperties: 1,
+      additionalProperties: { type: 'string', minLength: 1 },
+    },
     verbose: { type: 'boolean', default: false },
     rectifiers: {
       type: 'object',
@@ -48,31 +50,6 @@ const configSchema = {
         },
       },
     },
-    adapters: {
-      type: 'object',
-      additionalProperties: {
-        type: 'object',
-        required: ['protocol', 'requestRules'],
-        additionalProperties: false,
-        properties: {
-          protocol: { enum: ['openai', 'anthropic'] },
-          requestRules: {
-            type: 'array',
-            items: {
-              type: 'object',
-              required: ['field', 'action'],
-              additionalProperties: false,
-              properties: {
-                field: { type: 'string', minLength: 1 },
-                action: { enum: ['clamp', 'drop'] },
-                value: { type: 'array', minItems: 2, maxItems: 2 },
-                match: { type: 'object' },
-              },
-            },
-          },
-        },
-      },
-    },
     providers: {
       type: 'object',
       minProperties: 1,
@@ -83,7 +60,6 @@ const configSchema = {
         properties: {
           url: urlSchema,
           apiKey: { type: 'string', minLength: 0 },
-          responseApi: { type: 'boolean' },
           cooldownSeconds: { type: 'number', minimum: 0 },
           adapters: {
             type: 'object',
@@ -159,54 +135,46 @@ interface RawModel {
 
 interface RawConfig {
   port: number
-  apiKey: string
+  apiKeys: Record<string, string>
   verbose: boolean
   rectifiers?: RectifiersConfig
-  adapters?: Record<string, AdapterConfig>
   providers: Record<string, ProviderConfig>
   models: Record<string, RawModel>
 }
 
-const FIELD_PATH_SEGMENT = /^(?:[a-z_]\w*|\*)$/i
+/**
+ * Normalize the `apiKeys` config (`caller id -> key`) into `key -> caller id`
+ * so auth lookups and log attribution work off the key directly.
+ */
+export function normalizeApiKeys(raw: Record<string, string>): Record<string, string> {
+  const keys: Record<string, string> = {}
+  for (const [id, key] of Object.entries(raw)) {
+    if (Object.hasOwn(keys, key))
+      throw new Error(`Duplicate apiKey value configured for ids "${keys[key]}" and "${id}"`)
+    keys[key] = id
+  }
+  return keys
+}
 
-function validateRequestRule(adapterName: string, rule: RequestRule, index: number): void {
-  const ruleName = `Adapter "${adapterName}" rule ${index + 1}`
-  if (!rule.field.split('.').every(segment => FIELD_PATH_SEGMENT.test(segment)))
-    throw new Error(`${ruleName} has invalid field path "${rule.field}"`)
-
-  if (rule.action === 'clamp') {
-    if (!Array.isArray(rule.value) || rule.value.length !== 2)
-      throw new Error(`${ruleName} with action "clamp" requires value [min, max]`)
-    const [min, max] = rule.value
-    if ((min !== null && typeof min !== 'number') || (max !== null && typeof max !== 'number'))
-      throw new Error(`${ruleName} clamp bounds must be numbers or null`)
-    if (min === null && max === null)
-      throw new Error(`${ruleName} clamp requires at least one bound`)
-    if (min !== null && max !== null && min > max)
-      throw new Error(`${ruleName} clamp minimum cannot exceed maximum`)
+function validateRectifierNames(rectifiers: RectifiersConfig | undefined): void {
+  for (const name of Object.keys(rectifiers ?? {})) {
+    if (!Object.hasOwn(rectifierRegistry, name)) {
+      throw new Error(`Unknown rectifier "${name}" (available: ${Object.keys(rectifierRegistry).join(', ')})`)
+    }
   }
 }
 
-function validateAdapters(adapters: Record<string, AdapterConfig>): void {
-  for (const [name, adapter] of Object.entries(adapters)) {
-    adapter.requestRules.forEach((rule, index) => validateRequestRule(name, rule, index))
-  }
-}
-
-function resolveProtocolUrls(url: string | ProviderUrlConfig): { [K in Protocol]: string | null } {
-  if (typeof url === 'string') {
-    return { openai: url, anthropic: url }
-  }
+function resolveProtocolUrls(url: ProviderUrlConfig): { [K in UrlProtocol]: string | null } {
   return {
     openai: url.openai ?? null,
     anthropic: url.anthropic ?? null,
+    response: url.response ?? null,
   }
 }
 
 function resolveEndpoints(
   providers: Record<string, ProviderConfig>,
   models: Record<string, RawModel>,
-  adapters: Record<string, AdapterConfig>,
 ): Record<string, { endpoints: EndpointConfig[] }> {
   const resolved: Record<string, { endpoints: EndpointConfig[] }> = {}
 
@@ -223,9 +191,13 @@ function resolveEndpoints(
           const adapterName = hasEndpointOverride ? ep.adapters![protocol] : provider.adapters?.[protocol]
           if (!adapterName)
             continue
-          const adapter = adapters[adapterName]
-          if (!adapter)
-            throw new Error(`Provider "${ep.provider}" references unknown ${protocol} adapter "${adapterName}"`)
+          const adapter = builtinAdapters[adapterName]
+          if (!adapter) {
+            throw new Error(
+              `Provider "${ep.provider}" references unknown ${protocol} adapter "${adapterName}"`
+              + ` (available: ${Object.keys(builtinAdapters).join(', ')})`,
+            )
+          }
           if (adapter.protocol !== protocol)
             throw new Error(`Provider "${ep.provider}" references ${protocol} adapter "${adapterName}" declared for ${adapter.protocol}`)
           endpointAdapters[protocol] = adapter
@@ -237,7 +209,6 @@ function resolveEndpoints(
           cooldownSeconds: ep.cooldownSeconds ?? provider.cooldownSeconds ?? 900,
           priority: ep.priority,
           tag: ep.provider,
-          responseApi: provider.responseApi,
           adapters: endpointAdapters,
         }
       }),
@@ -266,9 +237,8 @@ export function loadConfig(configPath?: string): GatewayConfig {
   }
 
   const rawConfig = config as RawConfig
-  const adapters = rawConfig.adapters ?? {}
-  validateAdapters(adapters)
-  const resolved = resolveEndpoints(rawConfig.providers, rawConfig.models, adapters)
+  validateRectifierNames(rawConfig.rectifiers)
+  const resolved = resolveEndpoints(rawConfig.providers, rawConfig.models)
 
   const models: GatewayConfig['models'] = {}
   for (const [modelKey, rawModel] of Object.entries(rawConfig.models)) {
@@ -283,12 +253,11 @@ export function loadConfig(configPath?: string): GatewayConfig {
 
   return {
     port: rawConfig.port,
-    apiKey: rawConfig.apiKey,
+    apiKeys: normalizeApiKeys(rawConfig.apiKeys),
     verbose: rawConfig.verbose,
     rectifiers: rawConfig.rectifiers ?? {
       anthropicThinking: { enabled: false },
     },
-    adapters,
     providers: rawConfig.providers,
     models,
   }

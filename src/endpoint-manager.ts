@@ -1,11 +1,15 @@
-import type { EndpointConfig, ModelConfig, Protocol } from './types.js'
+import type { EndpointConfig, ModelConfig, Protocol, UrlProtocol } from './types.js'
 
 interface EndpointState {
   config: EndpointConfig
-  cooldownUntil: Record<Protocol, number>
+  cooldownUntil: Record<UrlProtocol, number>
 }
 
-const EMPTY_SET: ReadonlySet<string> = new Set()
+const EMPTY_SET: ReadonlySet<EndpointConfig> = new Set()
+
+export function urlKeyFor(protocol: Protocol, requireResponseApi: boolean): UrlProtocol {
+  return requireResponseApi && protocol === 'openai' ? 'response' : protocol
+}
 
 export class EndpointManager {
   private states: Map<string, EndpointState[]>
@@ -19,7 +23,7 @@ export class EndpointManager {
   registerModel(modelKey: string, endpoints: EndpointConfig[], modelConfig: ModelConfig): void {
     this.states.set(
       modelKey,
-      endpoints.map(config => ({ config, cooldownUntil: { openai: 0, anthropic: 0 } })),
+      endpoints.map(config => ({ config, cooldownUntil: { openai: 0, anthropic: 0, response: 0 } })),
     )
     this.modelConfigs.set(modelKey, modelConfig)
   }
@@ -40,17 +44,19 @@ export class EndpointManager {
     return config.urls[protocol]
   }
 
-  getAvailableEndpoint(modelName: string, excludeUrls: ReadonlySet<string> = EMPTY_SET, requireResponseApi = false, protocol: Protocol = 'openai'): EndpointConfig | null {
+  getAvailableEndpoint(modelName: string, excludeEndpoints: ReadonlySet<EndpointConfig> = EMPTY_SET, requireResponseApi = false, protocol: Protocol = 'openai'): EndpointConfig | null {
     const states = this.states.get(modelName)
     if (!states)
       return null
 
+    const urlKey = urlKeyFor(protocol, requireResponseApi)
     const now = Date.now()
     const available = states.filter(s =>
-      s.config.urls[protocol] !== null
-      && now >= s.cooldownUntil[protocol]
-      && !excludeUrls.has(s.config.urls[protocol]!)
-      && (!requireResponseApi || s.config.responseApi !== false),
+      s.config.urls[urlKey] !== null
+      && now >= s.cooldownUntil[urlKey]
+      // Exclude by endpoint identity, not URL: endpoints may share a URL while
+      // using different API keys and must stay independently selectable.
+      && !excludeEndpoints.has(s.config),
     )
     if (available.length === 0)
       return null
@@ -66,15 +72,15 @@ export class EndpointManager {
     return candidates[Math.floor(Math.random() * candidates.length)].config
   }
 
-  getRandomEndpoint(modelName: string, excludeUrls: ReadonlySet<string> = EMPTY_SET, requireResponseApi = false, protocol: Protocol = 'openai'): EndpointConfig | null {
+  getRandomEndpoint(modelName: string, excludeEndpoints: ReadonlySet<EndpointConfig> = EMPTY_SET, requireResponseApi = false, protocol: Protocol = 'openai'): EndpointConfig | null {
     const states = this.states.get(modelName)
     if (!states)
       return null
 
+    const urlKey = urlKeyFor(protocol, requireResponseApi)
     const candidates = states.filter(s =>
-      s.config.urls[protocol] !== null
-      && !excludeUrls.has(s.config.urls[protocol]!)
-      && (!requireResponseApi || s.config.responseApi !== false),
+      s.config.urls[urlKey] !== null
+      && !excludeEndpoints.has(s.config),
     )
     if (candidates.length === 0)
       return null
@@ -82,16 +88,18 @@ export class EndpointManager {
     return candidates[Math.floor(Math.random() * candidates.length)].config
   }
 
-  markCooldown(modelName: string, resolvedUrl: string, cooldownSeconds: number, protocol: Protocol): void {
+  markCooldown(modelName: string, endpoint: EndpointConfig, cooldownSeconds: number, urlKey: UrlProtocol): void {
     const states = this.states.get(modelName)
     if (!states)
       return
 
     const now = Date.now()
 
+    // Match by endpoint identity (not URL) so endpoints sharing a URL but using
+    // different API keys keep independent cooldown state.
     for (const state of states) {
-      if (state.config.urls[protocol] === resolvedUrl) {
-        state.cooldownUntil[protocol] = now + cooldownSeconds * 1000
+      if (state.config === endpoint) {
+        state.cooldownUntil[urlKey] = now + cooldownSeconds * 1000
         break
       }
     }
@@ -104,10 +112,10 @@ export class EndpointManager {
     return states.map(s => s.config)
   }
 
-  hasProtocolSupport(modelName: string, protocol: Protocol): boolean {
+  hasProtocolSupport(modelName: string, urlKey: UrlProtocol): boolean {
     const states = this.states.get(modelName)
     if (!states)
       return false
-    return states.some(s => s.config.urls[protocol] !== null)
+    return states.some(s => s.config.urls[urlKey] !== null)
   }
 }

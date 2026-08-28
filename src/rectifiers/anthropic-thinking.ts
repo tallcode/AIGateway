@@ -35,7 +35,10 @@ function rectifyThinkingRequestConfig(payload: Record<string, unknown>): boolean
   const thinking = asRecord(payload.thinking)
   const outputConfig = asRecord(payload.output_config)
 
-  if (thinking?.type === 'adaptive') {
+  // Some upstream "always-thinking" models (e.g. glm-5.3) reject requests that
+  // turn thinking off ("该模型始终思考，不支持关闭思考"), so both `adaptive` and
+  // `disabled` are rewritten to `enabled`; budget_tokens is filled in below.
+  if (thinking && (thinking.type === 'adaptive' || thinking.type === 'disabled')) {
     thinking.type = 'enabled'
     changed = true
   }

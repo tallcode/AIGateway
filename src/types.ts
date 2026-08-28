@@ -1,17 +1,16 @@
 export type Protocol = 'openai' | 'anthropic'
 
-export type RequestRuleAction = 'clamp' | 'drop'
+export type UrlProtocol = Protocol | 'response'
 
-export interface RequestRule {
-  field: string
-  action: RequestRuleAction
-  value?: [number | null, number | null]
-  match?: Record<string, unknown>
-}
-
-export interface AdapterConfig {
-  protocol: Protocol
-  requestRules: RequestRule[]
+/**
+ * Code-defined request adapter (see src/adapters/). Referenced by name from
+ * provider/endpoint config; `apply` mutates the cloned payload and reports
+ * whether anything changed.
+ */
+export interface Adapter {
+  readonly name: string
+  readonly protocol: Protocol
+  apply: (payload: Record<string, unknown>) => boolean
 }
 
 export interface RectifiersConfig {
@@ -23,25 +22,24 @@ export interface RectifiersConfig {
 export interface ProviderUrlConfig {
   openai?: string
   anthropic?: string
+  response?: string
 }
 
 export interface ProviderConfig {
-  url: string | ProviderUrlConfig
+  url: ProviderUrlConfig
   apiKey: string
-  responseApi?: boolean
   cooldownSeconds?: number
   adapters?: Partial<Record<Protocol, string>>
 }
 
 export interface EndpointConfig {
-  urls: { [K in Protocol]: string | null }
+  urls: { [K in UrlProtocol]: string | null }
   apiKey: string
   modelName: string
   cooldownSeconds: number
   priority: number
   tag: string
-  responseApi?: boolean
-  adapters: Partial<Record<Protocol, AdapterConfig>>
+  adapters: Partial<Record<Protocol, Adapter>>
 }
 
 export interface ModelConfig {
@@ -54,10 +52,13 @@ export interface ModelConfig {
 
 export interface GatewayConfig {
   port: number
-  apiKey: string
+  /**
+   * Downstream auth keys, normalized at load time to `upstream key -> caller id`.
+   * Config accepts `{ callerId: key }` entries; see normalizeApiKeys in config.ts.
+   */
+  apiKeys: Record<string, string>
   verbose: boolean
   rectifiers: RectifiersConfig
-  adapters: Record<string, AdapterConfig>
   providers: Record<string, ProviderConfig>
   models: Record<string, ModelConfig>
 }

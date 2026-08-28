@@ -2,10 +2,11 @@ import type { IncomingHttpHeaders } from 'node:http'
 import type { Readable } from 'node:stream'
 import type { EndpointManager } from './endpoint-manager.js'
 import type { UpstreamErrorResult } from './errors.js'
-import type { EndpointConfig, Protocol, RectifiersConfig, RequestRule } from './types.js'
+import type { EndpointConfig, Protocol, RectifiersConfig, UrlProtocol } from './types.js'
 import { Buffer } from 'node:buffer'
 import { Readable as ReadableStream } from 'node:stream'
 import { request } from 'undici'
+import { urlKeyFor } from './endpoint-manager.js'
 import { AllEndpointsFailedError, AllEndpointsInCooldownError, ProtocolNotSupportedError, RequestAdaptationError } from './errors.js'
 import { redactHeaders, summarizeBody } from './log-utils.js'
 import { rectifyAnthropicThinking } from './rectifiers/index.js'
@@ -37,10 +38,16 @@ function logTimestamp(): string {
   return `\x1B[90m[${ts}]\x1B[0m`
 }
 
-function logEndpoint(modelName: string, epName: string, status: number | string): void {
+// One line per upstream call. BY DESIGN the model field is the upstream model name
+// (endpoint.modelName), not the gateway model key: the log should show the model that
+// was actually called upstream, even when the request failed over to another endpoint.
+// callerId is the downstream API key's configured id (from `apiKeys`), so multi-key
+// setups can see who is calling; it is omitted when unavailable.
+function logEndpoint(callerId: string | undefined, modelName: string, epName: string, status: number | string): void {
   const isError = status === 'ERR' || status === 'TIMEOUT' || (typeof status === 'number' && status >= 400)
   const color = isError ? '\x1B[31m' : '\x1B[32m'
-  console.log(`${logTimestamp()} ${modelName}:${epName} ${color}${status}\x1B[0m`)
+  const who = callerId ? `[${callerId}] ` : ''
+  console.log(`${logTimestamp()} ${who}${modelName}:${epName} ${color}${status}\x1B[0m`)
 }
 
 function isTimeoutError(err: Error & { code?: string }): boolean {
@@ -49,101 +56,50 @@ function isTimeoutError(err: Error & { code?: string }): boolean {
   return /timeout/i.test(err.message)
 }
 
-const COOLDOWN_NETWORK_OR_5XX_SECONDS = 60
+const COOLDOWN_NETWORK_OR_5XX_SECONDS = 120
+const COOLDOWN_AUTH_OR_NOT_FOUND_SECONDS = 900
 const COOLDOWN_STANDARD_4XX_SECONDS = 30
+// Failover attempt cap per request. Each attempt picks the best-priority endpoint
+// that is not in cooldown and not tried yet, so when a higher-priority endpoint is
+// cooling down, lower-priority ones get their turn. Current configs have at most 3
+// endpoints per model, which this cap covers; raise it if a model ever gets more
+// endpoints, otherwise the extra ones would never be tried.
 const MAX_FAILOVER_ATTEMPTS = 3
 const RETRYABLE_4XX_STATUSES = new Set([400, 401, 403, 404, 422])
 
+// 400/401/403/404/422 are retried on other endpoints BY DESIGN: providers validate
+// parameters differently, so a request rejected by one may succeed on another.
 function shouldRetry(status: number): boolean {
   return status === 429
     || RETRYABLE_4XX_STATUSES.has(status)
     || status >= 500
 }
 
+// Cooldown policy:
+// - 429      -> endpoint-configured cooldownSeconds (the only status tied to the config;
+//               it reflects the provider's own rate limiting).
+// - 5xx/network -> COOLDOWN_NETWORK_OR_5XX_SECONDS (120s): server jitter, restarts or
+//                 redeploys that usually recover, but not within seconds.
+// - 401/404  -> COOLDOWN_AUTH_OR_NOT_FOUND_SECONDS (hardcoded 900s): a bad key or a
+//               wrong route is a config issue that won't self-fix quickly.
+// - 400      -> 0 (no cooldown): the next request may well have fixed the params, so
+//               the endpoint must not be sidelined.
+// - 403/422  -> COOLDOWN_STANDARD_4XX_SECONDS (30s): parameter/validation differences
+//               across providers; keep healthy endpoints around.
 function getCooldownSeconds(status: number, configuredCooldown: number): number {
-  if (status >= 500)
-    return COOLDOWN_NETWORK_OR_5XX_SECONDS
   if (status === 429)
     return configuredCooldown
-  if (RETRYABLE_4XX_STATUSES.has(status))
-    return COOLDOWN_STANDARD_4XX_SECONDS
-  return configuredCooldown
+  if (status >= 500)
+    return COOLDOWN_NETWORK_OR_5XX_SECONDS
+  if (status === 401 || status === 404)
+    return COOLDOWN_AUTH_OR_NOT_FOUND_SECONDS
+  if (status === 400)
+    return 0
+  return COOLDOWN_STANDARD_4XX_SECONDS
 }
 
 export function resolveUpstreamPath(requestPath: string): string {
   return `/${requestPath.replace(/^\/+/, '')}`
-}
-
-interface FieldTarget {
-  parent: Record<string, unknown> | unknown[]
-  key: string | number
-  value: unknown
-}
-
-function resolveFieldTargets(value: unknown, segments: string[], index = 0, parent?: Record<string, unknown> | unknown[], key?: string | number): FieldTarget[] {
-  if (index === segments.length) {
-    return parent === undefined || key === undefined ? [] : [{ parent, key, value }]
-  }
-  if (typeof value !== 'object' || value === null)
-    return []
-
-  const segment = segments[index]
-  const entries: [string, unknown][] = (segment === '*'
-    ? Object.entries(value)
-    : Object.hasOwn(value, segment)
-      ? [[segment, (value as Record<string, unknown>)[segment]]]
-      : []) as [string, unknown][]
-  const container = value as Record<string, unknown> | unknown[]
-  return entries.flatMap(([childKey, childValue]) => {
-    const resolvedKey = Array.isArray(container) ? Number(childKey) : childKey
-    return resolveFieldTargets(childValue, segments, index + 1, container, resolvedKey)
-  })
-}
-
-function matches(value: unknown, expected: Record<string, unknown>): boolean {
-  if (typeof value !== 'object' || value === null)
-    return false
-  return Object.entries(expected).every(([key, expectedValue]) => {
-    const actualValue = (value as Record<string, unknown>)[key]
-    if (typeof expectedValue === 'object' && expectedValue !== null && !Array.isArray(expectedValue))
-      return matches(actualValue, expectedValue as Record<string, unknown>)
-    return Object.is(actualValue, expectedValue)
-  })
-}
-
-function applyRule(payload: Record<string, unknown>, rule: RequestRule): boolean {
-  const targets = resolveFieldTargets(payload, rule.field.split('.'))
-  let applied = false
-  for (const target of targets) {
-    if (rule.match && !matches(target.value, rule.match))
-      continue
-
-    if (rule.action === 'clamp' && typeof target.value === 'number') {
-      const [min, max] = rule.value!
-      const replacement = Math.min(max ?? Infinity, Math.max(min ?? -Infinity, target.value))
-      if (replacement !== target.value) {
-        if (Array.isArray(target.parent) && typeof target.key === 'number')
-          target.parent[target.key] = replacement
-        else if (!Array.isArray(target.parent) && typeof target.key === 'string')
-          target.parent[target.key] = replacement
-        applied = true
-      }
-    }
-    else if (rule.action === 'drop') {
-      if (Array.isArray(target.parent)) {
-        const currentIndex = target.parent.indexOf(target.value)
-        if (currentIndex !== -1) {
-          target.parent.splice(currentIndex, 1)
-          applied = true
-        }
-      }
-      else if (Object.hasOwn(target.parent, target.key)) {
-        delete target.parent[target.key]
-        applied = true
-      }
-    }
-  }
-  return applied
 }
 
 function validateTransformedAnthropicPayload(payload: Record<string, unknown>): void {
@@ -172,21 +128,47 @@ export function prepareRequestPayload(
 
   const payload = structuredClone(requestBody) as Record<string, unknown>
   payload.model = endpoint.modelName
-  const rectifierRules: string[] = []
-  if (protocol === 'anthropic' && rectifiers) {
-    const result = rectifyAnthropicThinking(payload, rectifiers.anthropicThinking)
-    if (result.changed) {
-      rectifierRules.push('rectifier:anthropic-thinking')
-    }
+  const appliedRules: string[] = []
+  if (protocol === 'anthropic' && rectifiers && rectifyAnthropicThinking(payload, rectifiers.anthropicThinking).changed) {
+    appliedRules.push('rectifier:anthropic-thinking')
   }
   const adapter = endpoint.adapters[protocol]
-  const appliedRules = rectifierRules.concat(adapter?.requestRules
-    .filter(rule => applyRule(payload, rule))
-    .map(rule => `${adapter.protocol}:${rule.action}:${rule.field}`)
-    ?? [])
+  if (adapter && adapter.apply(payload)) {
+    appliedRules.push(`adapter:${adapter.name}`)
+  }
   if (protocol === 'anthropic' && appliedRules.length > 0)
     validateTransformedAnthropicPayload(payload)
   return { payload, appliedRules }
+}
+
+function extractUpstreamErrorMessage(body: string): string | undefined {
+  const candidates = [body]
+  for (const line of body.split(/\r?\n/)) {
+    const trimmed = line.trim()
+    if (trimmed.startsWith('data:')) {
+      const data = trimmed.slice(5).trim()
+      if (data)
+        candidates.push(data)
+    }
+  }
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate) as Record<string, unknown>
+      const error = parsed?.error
+      if (typeof error === 'object' && error !== null && typeof (error as Record<string, unknown>).message === 'string')
+        return (error as Record<string, unknown>).message as string
+      if (typeof error === 'string')
+        return error
+      if (typeof parsed?.message === 'string')
+        return parsed.message as string
+      if (typeof parsed?.errorMessage === 'string')
+        return parsed.errorMessage as string
+    }
+    catch {
+      // not JSON, try next candidate
+    }
+  }
+  return undefined
 }
 
 function truncateForLog(text: string, maxLen = 2000): string {
@@ -232,45 +214,61 @@ export class AiProxyHandler {
     userAgent?: string,
     protocol: Protocol = 'openai',
     anthropicHeaders?: AnthropicForwardHeaders,
+    callerId?: string,
   ): Promise<ProxyResult> {
     const allEndpoints = this.endpointManager.getAllEndpoints(modelName)
     if (allEndpoints.length === 0) {
       throw new Error(`No endpoints configured for model: ${modelName}`)
     }
 
-    if (!this.endpointManager.hasProtocolSupport(modelName, protocol)) {
+    const requireResponseApi = protocol === 'openai' && /\/responses\/?$/.test(requestPath)
+    const urlKey = urlKeyFor(protocol, requireResponseApi)
+
+    if (!this.endpointManager.hasProtocolSupport(modelName, urlKey)) {
       throw new ProtocolNotSupportedError(modelName, protocol)
     }
 
-    const requireResponseApi = protocol === 'openai' && /\/responses\/?$/.test(requestPath)
-
     let lastNetworkError: Error | null = null
     let lastUpstreamResult: UpstreamErrorResult | null = null
-    const triedUrls = new Set<string>()
+    // Exclude by endpoint identity, not URL: two providers may share the same URL
+    // with different API keys, and they must be treated as distinct endpoints.
+    const triedEndpoints = new Set<EndpointConfig>()
 
     for (let attempt = 0; attempt < MAX_FAILOVER_ATTEMPTS; attempt++) {
-      let endpoint = this.endpointManager.getAvailableEndpoint(modelName, triedUrls, requireResponseApi, protocol)
+      let endpoint = this.endpointManager.getAvailableEndpoint(modelName, triedEndpoints, requireResponseApi, protocol)
 
       if (!endpoint) {
-        endpoint = this.endpointManager.getRandomEndpoint(modelName, triedUrls, requireResponseApi, protocol)
+        endpoint = this.endpointManager.getRandomEndpoint(modelName, triedEndpoints, requireResponseApi, protocol)
         if (endpoint && this.verbose) {
-          console.log(`${logTimestamp()} All endpoints in cooldown for ${modelName}, randomly try ${endpoint.urls[protocol]}`)
+          console.log(`${logTimestamp()} All endpoints in cooldown for ${modelName}, randomly try ${endpoint.urls[urlKey]}`)
         }
       }
 
       if (!endpoint)
         throw new AllEndpointsInCooldownError(modelName)
 
-      const resolvedUrl = endpoint.urls[protocol]!
-      triedUrls.add(resolvedUrl)
+      const resolvedUrl = endpoint.urls[urlKey]!
+      triedEndpoints.add(endpoint)
 
       try {
-        const result = await this.sendToEndpoint(endpoint, requestBody, requestPath, userAgent, protocol, anthropicHeaders)
+        const result = await this.sendToEndpoint(endpoint, requestBody, requestPath, userAgent, protocol, anthropicHeaders, urlKey)
         const epName = endpoint.tag || extractEndpointName(resolvedUrl)
 
         if (shouldRetry(result.status)) {
           const cooldown = getCooldownSeconds(result.status, endpoint.cooldownSeconds)
-          logEndpoint(modelName, epName, result.status)
+          logEndpoint(callerId, endpoint.modelName, epName, result.status)
+          if ([400, 401, 403].includes(result.status)) {
+            const errorMessage = result.errorBody ? extractUpstreamErrorMessage(result.errorBody) : undefined
+            if (errorMessage) {
+              console.log(`${logTimestamp()} HTTP ${result.status} from ${resolvedUrl}: ${errorMessage}`)
+            }
+            else if (result.errorBody) {
+              console.log(`${logTimestamp()} HTTP ${result.status} from ${resolvedUrl} (no error message parsed): ${truncateForLog(result.errorBody)}`)
+            }
+            else {
+              console.log(`${logTimestamp()} HTTP ${result.status} from ${resolvedUrl} (empty response body)`)
+            }
+          }
           if (this.verbose) {
             console.log(`${logTimestamp()} HTTP ${result.status} from ${resolvedUrl}, cooldown ${cooldown}s, switching endpoint`)
             if (result.errorBody) {
@@ -284,11 +282,11 @@ export class AiProxyHandler {
           }
           await drainStream(result.body)
           if (cooldown > 0)
-            this.endpointManager.markCooldown(modelName, resolvedUrl, cooldown, protocol)
+            this.endpointManager.markCooldown(modelName, endpoint, cooldown, urlKey)
           continue
         }
 
-        logEndpoint(modelName, epName, result.status)
+        logEndpoint(callerId, endpoint.modelName, epName, result.status)
         return result
       }
       catch (error) {
@@ -296,7 +294,7 @@ export class AiProxyHandler {
           throw error
         const err = error as Error & { code?: string, cause?: unknown }
         const epName = endpoint.tag || extractEndpointName(resolvedUrl)
-        logEndpoint(modelName, epName, isTimeoutError(err) ? 'TIMEOUT' : 'ERR')
+        logEndpoint(callerId, endpoint.modelName, epName, isTimeoutError(err) ? 'TIMEOUT' : 'ERR')
 
         if (err.message.includes('serialize'))
           throw err
@@ -308,7 +306,7 @@ export class AiProxyHandler {
           if (err.cause)
             console.log(`    Cause: ${String(err.cause)}`)
         }
-        this.endpointManager.markCooldown(modelName, resolvedUrl, COOLDOWN_NETWORK_OR_5XX_SECONDS, protocol)
+        this.endpointManager.markCooldown(modelName, endpoint, COOLDOWN_NETWORK_OR_5XX_SECONDS, urlKey)
       }
     }
 
@@ -322,8 +320,9 @@ export class AiProxyHandler {
     userAgent?: string,
     protocol: Protocol = 'openai',
     anthropicHeaders?: AnthropicForwardHeaders,
+    urlKey: UrlProtocol = 'openai',
   ): Promise<ProxyResult> {
-    const baseUrl = endpoint.urls[protocol]!
+    const baseUrl = endpoint.urls[urlKey]!
     const normalizedBase = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`
     const url = new URL(resolveUpstreamPath(requestPath).replace(/^\//, ''), normalizedBase)
 
@@ -369,7 +368,7 @@ export class AiProxyHandler {
     try {
       response = await request(url.toString(), {
         method: 'POST',
-        headersTimeout: 120_000,
+        headersTimeout: 60_000,
         bodyTimeout: 360_000,
         headers: reqHeaders,
         body: reqBodyStr,

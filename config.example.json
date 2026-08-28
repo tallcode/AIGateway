@@ -1,40 +1,33 @@
 {
   "port": 3000,
-  "apiKey": "your-gateway-api-key",
+  "apiKeys": {
+    "laptop": "your-gateway-api-key",
+    "phone": "your-gateway-api-key-2"
+  },
   "verbose": false,
   "rectifiers": {
     "anthropicThinking": {
       "enabled": true
     }
   },
-  "adapters": {
-    "example-anthropic": {
-      "protocol": "anthropic",
-      "requestRules": [
-        {
-          "field": "thinking.budget_tokens",
-          "action": "clamp",
-          "value": [1, null]
-        }
-      ]
-    }
-  },
   "providers": {
     "openai": {
       "url": {
         "openai": "https://api.openai.com/v1",
+        "response": "https://api.openai.com/v1",
         "anthropic": "https://api.anthropic.com/v1"
       },
       "apiKey": "sk-xxx",
       "cooldownSeconds": 60,
       "adapters": {
-        "anthropic": "example-anthropic"
+        "anthropic": "common-anthropic"
       }
     },
     "openai-backup": {
-      "url": "https://openai-backup.example.com/v1",
-      "apiKey": "sk-yyy",
-      "responseApi": false
+      "url": {
+        "openai": "https://openai-backup.example.com/v1"
+      },
+      "apiKey": "sk-yyy"
     }
   },
   "models": {
@@ -58,7 +51,7 @@
           "modelName": "gpt-4-turbo",
           "cooldownSeconds": 120,
           "adapters": {
-            "anthropic": "example-anthropic"
+            "anthropic": "common-anthropic"
           },
           "priority": 2
         }
