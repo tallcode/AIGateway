@@ -203,3 +203,17 @@ test('deepseek-anthropic drops bare thinking blocks from assistant history', () 
   assert.equal(changed, true)
   assert.deepEqual(payload.messages[0].content, [{ type: 'text', text: 'final answer' }])
 })
+
+test('deepseek-anthropic prefers structured input_modalities over the modality string', () => {
+  // Structured field says text-only even though the legacy string mentions image.
+  const structured = { architecture: { modality: 'text+image', input_modalities: ['text'] }, endpoints: [] }
+  const payload = { messages: [{ role: 'user', content: [{ type: 'image', source: {} }, { type: 'text', text: 'keep' }] }] }
+  assert.equal(adapters['deepseek-anthropic'].apply(payload, structured), true)
+  assert.deepEqual(payload.messages[0].content, [{ type: 'text', text: 'keep' }])
+
+  // Structured field advertises image support.
+  const vision = { architecture: { modality: 'text', input_modalities: ['text', 'image'] }, endpoints: [] }
+  const payload2 = { messages: [{ role: 'user', content: [{ type: 'image', source: {} }, { type: 'text', text: 'keep' }] }] }
+  assert.equal(adapters['deepseek-anthropic'].apply(payload2, vision), false)
+  assert.equal(payload2.messages[0].content.length, 2)
+})

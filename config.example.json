@@ -39,9 +39,17 @@
         "tools": true
       },
       "architecture": {
-        "modality": "text+image"
+        "modality": "text+image",
+        "input_modalities": ["text", "image"],
+        "output_modalities": ["text"]
       },
       "maxOutputTokens": 32000,
+      "reasoning": {
+        "mandatory": false,
+        "default_enabled": true,
+        "supported_efforts": ["high", "low"],
+        "default_effort": "high"
+      },
       "endpoints": [
         {
           "provider": "openai",

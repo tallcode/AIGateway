@@ -326,3 +326,90 @@ test('leaves output limits alone when the model has no maxOutputTokens', () => {
   assert.equal(result.payload.max_tokens, 64000)
   assert.deepEqual(result.appliedRules, [])
 })
+
+// ---------------------------------------------------------------------------
+// Config-driven reasoning (OpenRouter-style `reasoning` block on the model)
+// ---------------------------------------------------------------------------
+
+const deepseekLikeModel = {
+  endpoints: [endpoint],
+  reasoning: { mandatory: false, supported_efforts: ['xhigh', 'high'], default_effort: 'high' },
+}
+
+test('keeps disabled thinking when the model declares reasoning as non-mandatory', () => {
+  const result = prepareRequestPayload(
+    { model: 'gateway-model', thinking: { type: 'disabled' } },
+    endpoint,
+    'anthropic',
+    { anthropicThinking: { enabled: true } },
+    deepseekLikeModel,
+  )
+  assert.deepEqual(result.payload, { model: 'upstream-model', thinking: { type: 'disabled' } })
+  assert.deepEqual(result.appliedRules, [])
+})
+
+test('rewrites disabled thinking when reasoning.mandatory is true', () => {
+  const result = prepareRequestPayload(
+    { model: 'gateway-model', thinking: { type: 'disabled' } },
+    endpoint,
+    'anthropic',
+    { anthropicThinking: { enabled: true } },
+    { endpoints: [endpoint], reasoning: { mandatory: true, supported_efforts: ['max', 'high', 'low'], default_effort: 'max' } },
+  )
+  assert.deepEqual(result.payload, {
+    model: 'upstream-model',
+    reasoning_effort: 'max',
+    thinking: { type: 'enabled', budget_tokens: 16000 },
+  })
+  assert.deepEqual(result.appliedRules, ['rectifier:anthropic-thinking'])
+})
+
+test('still normalizes adaptive thinking for non-mandatory models', () => {
+  const result = prepareRequestPayload(
+    { model: 'gateway-model', thinking: { type: 'adaptive' } },
+    endpoint,
+    'anthropic',
+    { anthropicThinking: { enabled: true } },
+    deepseekLikeModel,
+  )
+  assert.equal(result.payload.thinking.type, 'enabled')
+  assert.equal(result.payload.reasoning_effort, 'high')
+  assert.equal(result.payload.thinking.budget_tokens, 4096)
+})
+
+test('uses the model default_effort when the client sends no effort', () => {
+  const result = prepareRequestPayload(
+    { model: 'gateway-model', thinking: { type: 'enabled' } },
+    endpoint,
+    'anthropic',
+    { anthropicThinking: { enabled: true } },
+    deepseekLikeModel,
+  )
+  assert.equal(result.payload.reasoning_effort, 'high')
+  assert.equal(result.payload.thinking.budget_tokens, 4096)
+})
+
+test('fits unsupported efforts into the supported set, preferring the model default', () => {
+  const result = prepareRequestPayload(
+    { model: 'gateway-model', reasoning_effort: 'low', thinking: { type: 'enabled' } },
+    endpoint,
+    'anthropic',
+    { anthropicThinking: { enabled: true } },
+    deepseekLikeModel,
+  )
+  // 'low' is not in [xhigh, high]; preference order misses, default_effort 'high' wins.
+  assert.equal(result.payload.reasoning_effort, 'high')
+  assert.equal(result.payload.thinking.budget_tokens, 4096)
+})
+
+test('keeps supported efforts as-is and boosts high to xhigh when supported', () => {
+  const result = prepareRequestPayload(
+    { model: 'gateway-model', reasoning_effort: 'high', thinking: { type: 'enabled' } },
+    endpoint,
+    'anthropic',
+    { anthropicThinking: { enabled: true } },
+    deepseekLikeModel,
+  )
+  assert.equal(result.payload.reasoning_effort, 'xhigh')
+  assert.equal(result.payload.thinking.budget_tokens, 16000)
+})

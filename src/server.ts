@@ -256,6 +256,10 @@ export function createServer(
           entry.features = meta.features
         if (meta.architecture !== undefined)
           entry.architecture = meta.architecture
+        if (meta.maxOutputTokens !== undefined)
+          entry.max_output_tokens = meta.maxOutputTokens
+        if (meta.reasoning !== undefined)
+          entry.reasoning = meta.reasoning
       }
       return entry
     })

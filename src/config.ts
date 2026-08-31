@@ -1,4 +1,4 @@
-import type { EndpointConfig, GatewayConfig, Protocol, ProviderConfig, ProviderUrlConfig, RectifiersConfig, UrlProtocol } from './types.js'
+import type { EndpointConfig, GatewayConfig, Protocol, ProviderConfig, ProviderUrlConfig, ReasoningConfig, RectifiersConfig, UrlProtocol } from './types.js'
 import { existsSync, readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { resolve } from 'node:path'
@@ -83,8 +83,26 @@ const configSchema = {
           name: { type: 'string', minLength: 1 },
           contextLength: { type: 'number', minimum: 1 },
           features: { type: 'object' },
-          architecture: { type: 'object' },
+          architecture: {
+            type: 'object',
+            properties: {
+              modality: { type: 'string' },
+              input_modalities: { type: 'array', items: { type: 'string', minLength: 1 } },
+              output_modalities: { type: 'array', items: { type: 'string', minLength: 1 } },
+            },
+          },
           maxOutputTokens: { type: 'number', minimum: 1 },
+          reasoning: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              mandatory: { type: 'boolean' },
+              default_enabled: { type: 'boolean' },
+              supports_max_tokens: { type: 'boolean' },
+              supported_efforts: { type: 'array', items: { type: 'string', minLength: 1 } },
+              default_effort: { type: 'string', minLength: 1 },
+            },
+          },
           endpoints: {
             type: 'array',
             minItems: 1,
@@ -132,6 +150,7 @@ interface RawModel {
   features?: Record<string, unknown>
   architecture?: Record<string, unknown>
   maxOutputTokens?: number
+  reasoning?: ReasoningConfig
   endpoints: RawEndpoint[]
 }
 
@@ -250,6 +269,7 @@ export function loadConfig(configPath?: string): GatewayConfig {
       features: rawModel.features,
       architecture: rawModel.architecture,
       maxOutputTokens: rawModel.maxOutputTokens,
+      reasoning: rawModel.reasoning,
       endpoints: resolved[modelKey].endpoints,
     }
   }

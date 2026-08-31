@@ -26,9 +26,16 @@ const UNSUPPORTED_BLOCK_TYPES = new Set([
 // Older DeepSeek models also reject images.
 const TEXT_ONLY_BLOCK_TYPES = new Set([...UNSUPPORTED_BLOCK_TYPES, 'image'])
 
-/** Whether the model accepts image content, derived from `architecture.modality`. */
+/**
+ * Whether the model accepts image content: OpenRouter-style
+ * `architecture.input_modalities` wins when present, otherwise the legacy
+ * `architecture.modality` string is parsed.
+ */
 function acceptsImages(model: ModelConfig): boolean {
-  const modality = model.architecture?.modality
+  const arch = model.architecture
+  if (Array.isArray(arch?.input_modalities))
+    return arch.input_modalities.includes('image')
+  const modality = arch?.modality
   return typeof modality === 'string' && modality.includes('image')
 }
 

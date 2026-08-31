@@ -189,7 +189,7 @@ export function prepareRequestPayload(
   payload.model = endpoint.modelName
   const model = modelConfigForEndpoint(modelConfig, endpoint)
   const appliedRules: string[] = []
-  if (protocol === 'anthropic' && rectifiers && rectifyAnthropicThinking(payload, rectifiers.anthropicThinking).changed) {
+  if (protocol === 'anthropic' && rectifiers && rectifyAnthropicThinking(payload, rectifiers.anthropicThinking, model.reasoning).changed) {
     appliedRules.push('rectifier:anthropic-thinking')
   }
   const adapter = endpoint.adapters[protocol]

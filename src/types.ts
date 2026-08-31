@@ -47,10 +47,29 @@ export interface EndpointConfig {
   adapters: Partial<Record<Protocol, Adapter>>
 }
 
+/**
+ * Per-model reasoning capabilities, mirroring OpenRouter's `reasoning` block
+ * verbatim (snake_case so values can be copied straight from OpenRouter's
+ * model list). Drives the Anthropic thinking rectifier and is exposed to
+ * downstream clients via /v1/models.
+ */
+export interface ReasoningConfig {
+  mandatory?: boolean
+  default_enabled?: boolean
+  supports_max_tokens?: boolean
+  supported_efforts?: string[]
+  default_effort?: string
+}
+
 export interface ModelConfig {
   name?: string
   contextLength?: number
   features?: Record<string, unknown>
+  /**
+   * Model architecture metadata. May carry OpenRouter-style structured fields
+   * (`modality`, `input_modalities`, `output_modalities`) or just a plain
+   * `modality` string.
+   */
   architecture?: Record<string, unknown>
   /**
    * Output-token cap for this model. When set, the gateway clamps the
@@ -59,6 +78,8 @@ export interface ModelConfig {
    * where the field is protocol-required.
    */
   maxOutputTokens?: number
+  /** Per-model reasoning capabilities (see ReasoningConfig). */
+  reasoning?: ReasoningConfig
   endpoints: EndpointConfig[]
 }
 
